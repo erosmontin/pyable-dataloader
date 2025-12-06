@@ -13,6 +13,7 @@ A production-ready PyTorch Dataset for loading and preprocessing medical images 
 - ✅ **Registration Integration**: Apply transforms from registration directly
 - ✅ **Caching**: Fast loading with automatic caching of preprocessed data
 - ✅ **Augmentation**: Medical imaging-aware data augmentation
+- ✅ **Debug Save**: Save processed images for manual inspection and pipeline verification
 - ✅ **Overlay Support**: Easy mapping from model outputs back to original space
 
 ## Installation
@@ -97,6 +98,35 @@ for epoch in range(num_epochs):
         
         print(f"Batch shape: {images.shape}, Loss: {loss.item():.4f}")
 ```
+
+### Debug Save Functionality
+
+For debugging and verifying your preprocessing pipeline, you can save the processed images that are sent to training:
+
+```python
+from pyable_dataloader import PyableDataset
+
+# Create dataset with debug save enabled
+dataset = PyableDataset(
+    manifest='data/manifest.json',
+    target_size=[64, 64, 64],
+    target_spacing=2.0,
+    transforms=train_transforms,
+    debug_save_dir='./debug_images',  # Directory to save processed images
+    debug_save_format='nifti'          # 'nifti' or 'numpy'
+)
+
+# Process first sample - images will be saved to ./debug_images/
+sample = dataset[0]
+
+# Files saved will include:
+# - subject_id_image_0.nii.gz (first image)
+# - subject_id_image_1.nii.gz (second image, if multi-modal)
+# - subject_id_roi_0.nii.gz (first ROI)
+# - subject_id_labelmap_0.nii.gz (first labelmap)
+```
+
+This saves images after all preprocessing (resampling, transforms, ROI masking) but before tensor conversion, allowing you to manually inspect what your model actually receives.
 
 ### Complete Training Example
 
