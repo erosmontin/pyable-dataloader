@@ -12,7 +12,7 @@ import tempfile
 import json
 from pathlib import Path
 
-from pyable_dataloader import PyableDataset, IntensityNormalization, RandomFlip, Compose, RandomTranslation
+from pyable_dataloader import PyableDataset, IntensityNormalization, RandomFlip, Compose, RandomTranslation, RandomRotation
 
 
 def create_synthetic_image(size=(32, 32, 32), spacing=(1.0, 1.0, 1.0)):
@@ -308,6 +308,67 @@ def test_overlay_function(temp_dataset):
     # Check that it's a valid SimpleITK image
     assert isinstance(original_space_sitk, sitk.Image)
     assert original_space_sitk.GetSize() == (32, 32, 32)  # Original size
+
+
+def test_get_multiple_augmentations(temp_dataset):
+    """Test get_multiple_augmentations method."""
+    manifest_path, tmpdir = temp_dataset
+    
+    dataset = PyableDataset(
+        manifest=str(manifest_path),
+        target_size=[16, 16, 16],
+        return_meta=True
+    )
+    
+    # Define augmentation configs
+    augmentation_configs = [
+        {
+            'name': 'rotation_only',
+            'transforms': Compose([
+                IntensityNormalization(method='zscore'),
+                RandomRotation(rotation_range=[[-5, 5], [-5, 5], [-5, 5]], prob=1.0)
+            ])
+        },
+        {
+            'name': 'translation_only',
+            'transforms': Compose([
+                IntensityNormalization(method='zscore'),
+                RandomTranslation(translation_range=[[-2, 2], [-2, 2], [-1, 1]], prob=1.0)
+            ])
+        }
+    ]
+    
+    # Get multiple augmentations
+    results = dataset.get_multiple_augmentations(
+        subject_idx=0,
+        augmentation_configs=augmentation_configs,
+        base_seed=42
+    )
+    
+    # Check results
+    assert len(results) == 2
+    assert results[0]['name'] == 'rotation_only'
+    assert results[1]['name'] == 'translation_only'
+    
+    # Check that each has the required keys
+    for result in results:
+        assert 'images' in result
+        assert 'rois' in result
+        assert 'labelmaps' in result
+        assert 'meta' in result
+        assert 'config' in result
+        assert result['config']['name'] == result['name']
+    
+    # Check reproducibility: same seed should give same results
+    results2 = dataset.get_multiple_augmentations(
+        subject_idx=0,
+        augmentation_configs=augmentation_configs,
+        base_seed=42
+    )
+    
+    # Compare images (should be identical due to same seed)
+    np.testing.assert_array_equal(results[0]['images'], results2[0]['images'])
+    np.testing.assert_array_equal(results[1]['images'], results2[1]['images'])
 
 
 if __name__ == '__main__':

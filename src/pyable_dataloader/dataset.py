@@ -14,7 +14,7 @@ import os
 import hashlib
 import json
 from pathlib import Path
-from typing import Union, List, Dict, Callable, Optional, Tuple
+from typing import Union, List, Dict, Callable, Optional, Tuple, Any
 import warnings
 import tempfile
 
@@ -616,6 +616,62 @@ class PyableDataset(Dataset):
             'labelmaps': labelmap_arrays,
             'meta': meta
         }
+    
+    def get_multiple_augmentations(
+        self,
+        subject_idx: int,
+        augmentation_configs: List[Dict[str, Any]],
+        as_nifti: bool = False,
+        save_to_files: bool = False,
+        base_seed: int = 42
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate multiple augmented versions of a sample using different transformation configs.
+
+        Args:
+            subject_idx: Index of subject in dataset
+            augmentation_configs: List of dicts, each containing:
+                - 'transforms': Compose object with augmentation pipeline
+                - 'name': str identifier for this augmentation type
+                - 'params': dict of parameters (optional, for logging)
+            as_nifti: Return SimpleITK images instead of numpy arrays
+            save_to_files: Save to temporary NIfTI files and return paths
+            base_seed: Base random seed (will be modified per augmentation)
+
+        Returns:
+            List of dicts, one per augmentation config, each containing:
+            - 'name': augmentation identifier
+            - 'images': list of arrays/images/paths
+            - 'rois': list of arrays/images/paths
+            - 'labelmaps': list of arrays/images/paths
+            - 'meta': metadata dict
+            - 'config': original config dict
+        """
+        results = []
+        for idx, config in enumerate(augmentation_configs):
+            # Set seed for reproducibility
+            np.random.seed(base_seed + idx)
+            
+            # Get augmented sample
+            sample = self.get_numpy_item(
+                subject_idx,
+                transforms=config.get('transforms'),
+                as_nifti=as_nifti,
+                save_to_files=save_to_files
+            )
+            
+            # Format result
+            result = {
+                'name': config['name'],
+                'images': sample['images'],
+                'rois': sample['rois'],
+                'labelmaps': sample['labelmaps'],
+                'meta': sample['meta'],
+                'config': config
+            }
+            results.append(result)
+        
+        return results
     
     def _select_reference(self, images: List[SITKImaginable], item: dict) -> SITKImaginable:
         """Select reference image for subject."""

@@ -693,6 +693,70 @@ import SimpleITK as sitk
 sitk.WriteImage(original_space_sitk, f'results/{subject_id}_prediction.nii.gz')
 ```
 
+### Multiple Augmentations for Feature Extraction
+
+For robust radiomics analysis and feature stability assessment, you can generate multiple augmented versions of the same sample using different transformation configurations:
+
+```python
+from pyable_dataloader import PyableDataset, Compose, RandomRotation, RandomTranslation, IntensityNormalization
+
+# Define different augmentation strategies
+augmentation_configs = [
+    {
+        'name': 'light_rotation',
+        'transforms': Compose([
+            IntensityNormalization(method='zscore'),
+            RandomRotation(rotation_range=[[-5, 5], [-5, 5], [-5, 5]], prob=1.0)
+        ]),
+        'params': {'rotation_range': '±5°'}
+    },
+    {
+        'name': 'heavy_translation',
+        'transforms': Compose([
+            IntensityNormalization(method='zscore'),
+            RandomTranslation(translation_range=[[-10, 10], [-10, 10], [-5, 5]], prob=1.0)
+        ]),
+        'params': {'translation_range': '±10mm X/Y, ±5mm Z'}
+    },
+    {
+        'name': 'combined_augmentation',
+        'transforms': Compose([
+            IntensityNormalization(method='zscore'),
+            RandomRotation(rotation_range=[[-10, 10], [-10, 10], [-10, 10]], prob=1.0),
+            RandomTranslation(translation_range=[[-5, 5], [-5, 5], [-3, 3]], prob=1.0),
+            RandomFlip(axes=[1, 2], prob=0.5)
+        ]),
+        'params': {'rotation': '±10°', 'translation': '±5mm', 'flip': 'Y/Z axes'}
+    }
+]
+
+dataset = PyableDataset(manifest='data.json', target_size=[64, 64, 64], target_spacing=2.0)
+
+# Get multiple augmentations for subject 0
+augmented_samples = dataset.get_multiple_augmentations(
+    subject_idx=0,
+    augmentation_configs=augmentation_configs,
+    as_nifti=True,
+    save_to_files=True,
+    base_seed=42
+)
+
+# Each element corresponds to one config
+for sample in augmented_samples:
+    print(f"Augmentation: {sample['name']}")
+    print(f"Image paths: {sample['images']}")
+    print(f"ROI paths: {sample['rois']}")
+    
+    # Extract features with pyfe
+    features = pyfe.extract_features_from_files(
+        sample['images'],
+        sample['rois']
+    )
+    print(f"Extracted {len(features)} features")
+```
+
+This enables assessment of feature stability across different augmentation strategies, crucial for robust radiomics analysis.
+
 ## API Reference
 
 ### PyableDataset
@@ -741,6 +805,39 @@ Dictionary with:
 - `'rois'`: List[torch.Tensor] (each D × H × W)
 - `'labelmaps'`: List[torch.Tensor] (each D × H × W)
 - `'meta'`: dict with spacing, origin, direction, etc. (if return_meta=True)
+
+#### get_multiple_augmentations()
+
+```python
+get_multiple_augmentations(
+    subject_idx: int,
+    augmentation_configs: List[Dict[str, Any]],
+    as_nifti: bool = False,
+    save_to_files: bool = False,
+    base_seed: int = 42
+) -> List[Dict[str, Any]]
+```
+
+Generate multiple augmented versions of a sample using different transformation configs.
+
+**Parameters:**
+- `subject_idx`: Index of subject in dataset
+- `augmentation_configs`: List of dicts, each containing:
+  - `'transforms'`: Compose object with augmentation pipeline
+  - `'name'`: str identifier for this augmentation type
+  - `'params'`: dict of parameters (optional, for logging)
+- `as_nifti`: Return SimpleITK images instead of numpy arrays
+- `save_to_files`: Save to temporary NIfTI files and return paths
+- `base_seed`: Base random seed (will be modified per augmentation)
+
+**Returns:**
+List of dicts, one per augmentation config, each containing:
+- `'name'`: augmentation identifier
+- `'images'`: list of arrays/images/paths
+- `'rois'`: list of arrays/images/paths
+- `'labelmaps'`: list of arrays/images/paths
+- `'meta'`: metadata dict
+- `'config'`: original config dict
 
 ### Transforms
 
