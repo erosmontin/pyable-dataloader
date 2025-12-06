@@ -7,3 +7,5 @@ __pycache__/
 theenv/
 newenv/
 build/
+testenv/
+dist/
