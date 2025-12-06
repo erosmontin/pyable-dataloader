@@ -729,8 +729,8 @@ pytest tests/ -v
 
 See the `examples/` directory for complete examples:
 
-- `example_unified_nifti_style.py`: Replicates original UnifiedNiftiDataset workflow
-- `example_pytorch_and_pyfe.py`: Integration with pyfe for feature extraction
+- `example_simple.py`: Basic usage with synthetic data demonstrating transforms and DataLoader integration
+- `example_unified_nifti_style.py`: Replicates original UnifiedNiftiDataset workflow (requires CSV files)
 
 ## Contributing
 
