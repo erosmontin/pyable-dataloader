@@ -385,6 +385,146 @@ sub002,/data/sub002/T1.nii.gz,,,first,0.0
 
 ## Advanced Usage
 
+### Non-PyTorch Usage (Feature Extraction)
+
+For feature extraction or other non-PyTorch applications (like pyfe), use `get_numpy_item()` to get numpy arrays, NIfTI images, or pyable objects instead of PyTorch tensors.
+
+#### Basic Numpy Arrays
+
+```python
+from pyable_dataloader import PyableDataset
+
+dataset = PyableDataset(
+    manifest='data/manifest.json',
+    target_size=[64, 64, 64],
+    target_spacing=2.0
+)
+
+# Get numpy arrays for feature extraction
+sample = dataset.get_numpy_item(0)
+images = sample['images']  # List of numpy arrays (Z, Y, X)
+rois = sample['rois']      # List of numpy arrays (Z, Y, X)
+meta = sample['meta']      # Metadata dict
+
+# Use with pyfe or other libraries
+# features = pyfe.extract_features(images, rois, ...)
+```
+
+#### NIfTI Images
+
+```python
+# Get SimpleITK images
+sample = dataset.get_numpy_item(0, as_nifti=True)
+images = sample['images']  # List of SimpleITK images
+rois = sample['rois']      # List of SimpleITK images
+
+# Save or process as NIfTI
+import SimpleITK as sitk
+sitk.WriteImage(images[0], 'processed_image.nii.gz')
+```
+
+### Pyfe Integration: Requesting Files and Augmented Data
+
+This section explains recommended patterns for pyfe (or any feature-extraction agent) to request data from `pyable-dataloader`.
+
+- Use original file paths when pyfe can operate directly on NIfTI files.
+- Use `get_numpy_item(..., as_nifti=True)` and save to temporary NIfTI files when augmentation or preprocessing is required.
+
+1) Get original file paths (no augmentation)
+
+```python
+def get_original_files_for_pyfe(dataset, subject_idx):
+    """Return original file paths from the dataset manifest."""
+    subject_id = dataset.ids[subject_idx]
+    item = dataset.data[subject_id]
+    return {
+        'images': item.get('images', []),
+        'rois': item.get('rois', []),
+        'labelmaps': item.get('labelmaps', [])
+    }
+
+# Example usage
+dataset = PyableDataset(manifest='data/manifest.json', target_size=[64,64,64])
+paths = get_original_files_for_pyfe(dataset, 0)
+# paths['images'] contains the original NIfTI paths you can pass to pyfe
+```
+
+2) Get augmented/processed files (safe for pyfe) — recommended when you need the exact preprocessed inputs
+
+```python
+import tempfile
+from pathlib import Path
+import SimpleITK as sitk
+
+def get_augmented_files_for_pyfe(dataset, subject_idx, augmentation_transforms=None):
+    """Return paths to temporary NIfTI files containing processed (and optionally augmented) data.
+
+    The files live in a temporary directory; process them immediately or copy them out.
+    """
+    sample = dataset.get_numpy_item(subject_idx, as_nifti=True, transforms=augmentation_transforms)
+
+    tmpdir = Path(tempfile.mkdtemp(prefix=f"pyfe_{dataset.ids[subject_idx]}_"))
+    tmpdir.mkdir(parents=True, exist_ok=True)
+
+    out = {'images': [], 'rois': [], 'labelmaps': [], 'meta': sample.get('meta', {})}
+
+    for i, sitk_img in enumerate(sample['images']):
+        p = tmpdir / f"image_{i}.nii.gz"
+        sitk.WriteImage(sitk_img, str(p))
+        out['images'].append(str(p))
+
+    for i, sitk_roi in enumerate(sample.get('rois', [])):
+        p = tmpdir / f"roi_{i}.nii.gz"
+        sitk.WriteImage(sitk_roi, str(p))
+        out['rois'].append(str(p))
+
+    for i, sitk_lm in enumerate(sample.get('labelmaps', [])):
+        p = tmpdir / f"labelmap_{i}.nii.gz"
+        sitk.WriteImage(sitk_lm, str(p))
+        out['labelmaps'].append(str(p))
+
+    # Return the temp directory paths. Caller is responsible for cleanup.
+    return out
+
+# Example usage
+# aug_transforms = Compose([...])
+# files = get_augmented_files_for_pyfe(dataset, 0, augmentation_transforms=aug_transforms)
+# features = pyfe.extract_features_from_files(files['images'], files['rois'])
+```
+
+Notes:
+- The dataset already caches preprocessed resampled volumes; repeated calls are fast.
+- If you need automatic cleanup, adapt `get_augmented_files_for_pyfe` to use `TemporaryDirectory()` as a context manager and perform pyfe extraction inside that context.
+
+#### Pyable Objects
+
+```python
+# Get pyable objects for advanced processing
+sample = dataset.get_numpy_item(0, as_pyable=True)
+images = sample['images']  # List of SITKImaginable objects
+rois = sample['rois']      # List of Roiable objects
+
+# Apply pyable operations
+for img in images:
+    img.resampleOnTargetImage(target_img)
+```
+
+#### File Paths for Feature Extraction
+
+If your feature extraction tool requires file paths instead of numpy arrays, use `save_to_files=True` to save the processed (and optionally augmented) data to temporary NIfTI files:
+
+```python
+# Get file paths to processed/augmented NIfTI files
+sample = dataset.get_numpy_item(0, save_to_files=True, transforms=aug_transforms)
+image_paths = sample['images']  # List of file paths to NIfTI files
+roi_paths = sample['rois']      # List of file paths to ROI NIfTI files
+
+# Use with pyfe or other tools that need file inputs
+# features = pyfe.extract_features_from_files(image_paths, roi_paths, ...)
+```
+
+The temporary files are automatically cleaned up when your Python session ends, or you can manually clean them using the `temp_dir` in the metadata.
+
 ### Data Augmentation
 
 Data augmentation is applied using composable transform classes. All transforms automatically preserve labels in ROIs and labelmaps using nearest-neighbor interpolation.

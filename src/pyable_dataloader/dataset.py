@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 from typing import Union, List, Dict, Callable, Optional, Tuple
 import warnings
+import tempfile
 
 import torch
 from torch.utils.data import Dataset
@@ -126,7 +127,8 @@ class PyableDataset(Dataset):
         return_meta: bool = True,
         orientation: str = 'LPS',
         debug_save_dir: Optional[str] = None,
-        debug_save_format: str = 'nifti'
+        debug_save_format: str = 'nifti',
+        return_numpy: bool = False,
     ):
         self.target_size = target_size
         
@@ -150,6 +152,8 @@ class PyableDataset(Dataset):
         self.orientation = orientation
         self.debug_save_dir = debug_save_dir
         self.debug_save_format = debug_save_format
+        # If True, convenience getters will return numpy arrays instead of torch tensors
+        self.return_numpy = return_numpy
         
         # Load manifest
         self.data = self._load_manifest(manifest)
@@ -418,6 +422,200 @@ class PyableDataset(Dataset):
             elif self.debug_save_format == 'numpy':
                 filename = debug_dir / f"{subject_id}_labelmap_{i}.npy"
                 np.save(filename, lm_array)
+        
+    def get_numpy_item(self, idx: int, as_nifti: bool = False, as_pyable: bool = False, transforms: Optional[Callable] = None, save_to_files: bool = False) -> dict:
+        """Return the pre-tensor data for a sample.
+
+        Args:
+            idx: Dataset index
+            as_nifti: If True, return SimpleITK images for images/rois/labelmaps
+            as_pyable: If True, return pyable `SITKImaginable`, `Roiable`, and `LabelMapable` objects
+            transforms: Optional additional transforms to apply (e.g., for on-demand augmentation)
+            save_to_files: If True, save processed arrays to temporary NIfTI files and return file paths
+
+        Returns:
+            dict with keys: 'images' (list of arrays, images, or paths), 'rois', 'labelmaps', 'meta'
+        """
+        # Use the normal __getitem__ pipeline and convert back to numpy if needed
+        # Insert the src path to ensure local code is used when testing via src/
+        sample = None
+        # Call internal pipeline by getting the processed result (before tensor conversion)
+        # The existing implementation builds a `result` dict before calling _format_output.
+        # To avoid duplicating logic, we'll call __getitem__ and convert tensors back to numpy.
+        item = self.__getitem__(idx)
+
+        # Extract images
+        images = item.get('images')
+        rois = item.get('rois', [])
+        labelmaps = item.get('labelmaps', [])
+        meta = item.get('meta', {})
+
+        # Convert torch tensors to numpy
+        def to_numpy(x):
+            if isinstance(x, torch.Tensor):
+                return x.cpu().numpy()
+            return x
+
+        images_np = to_numpy(images)
+        # images_np may be CxZxYxX or ZxYxX
+        if isinstance(images_np, np.ndarray) and images_np.ndim == 4:
+            image_arrays = [images_np[i] for i in range(images_np.shape[0])]
+        elif isinstance(images_np, np.ndarray) and images_np.ndim == 3:
+            image_arrays = [images_np]
+        else:
+            image_arrays = images_np if isinstance(images_np, list) else [images_np]
+
+        roi_arrays = [to_numpy(r) for r in rois]
+        labelmap_arrays = [to_numpy(lm) for lm in labelmaps]
+
+        # Apply additional transforms if provided (e.g., on-demand augmentation)
+        if transforms is not None:
+            image_arrays, roi_arrays, labelmap_arrays = transforms(image_arrays, roi_arrays, labelmap_arrays, meta)
+
+        # Optionally save to temporary files and return paths
+        if save_to_files:
+            temp_dir = Path(tempfile.mkdtemp())
+            
+            image_paths = []
+            for i, arr in enumerate(image_arrays):
+                sitk_img = sitk.GetImageFromArray(arr.astype(np.float32))
+                if 'spacing' in meta:
+                    sitk_img.SetSpacing(meta['spacing'])
+                if 'origin' in meta:
+                    sitk_img.SetOrigin(meta['origin'])
+                if 'direction' in meta:
+                    sitk_img.SetDirection(meta['direction'])
+                path = temp_dir / f"image_{i}.nii.gz"
+                sitk.WriteImage(sitk_img, str(path))
+                image_paths.append(str(path))
+            
+            roi_paths = []
+            for i, arr in enumerate(roi_arrays):
+                sitk_roi = sitk.GetImageFromArray(arr.astype(np.uint8))
+                if 'spacing' in meta:
+                    sitk_roi.SetSpacing(meta['spacing'])
+                if 'origin' in meta:
+                    sitk_roi.SetOrigin(meta['origin'])
+                if 'direction' in meta:
+                    sitk_roi.SetDirection(meta['direction'])
+                path = temp_dir / f"roi_{i}.nii.gz"
+                sitk.WriteImage(sitk_roi, str(path))
+                roi_paths.append(str(path))
+            
+            labelmap_paths = []
+            for i, arr in enumerate(labelmap_arrays):
+                sitk_lm = sitk.GetImageFromArray(arr.astype(np.uint8))
+                if 'spacing' in meta:
+                    sitk_lm.SetSpacing(meta['spacing'])
+                if 'origin' in meta:
+                    sitk_lm.SetOrigin(meta['origin'])
+                if 'direction' in meta:
+                    sitk_lm.SetDirection(meta['direction'])
+                path = temp_dir / f"labelmap_{i}.nii.gz"
+                sitk.WriteImage(sitk_lm, str(path))
+                labelmap_paths.append(str(path))
+            
+            # Store temp_dir in meta for cleanup reference
+            meta['temp_dir'] = str(temp_dir)
+            
+            return {
+                'images': image_paths,
+                'rois': roi_paths,
+                'labelmaps': labelmap_paths,
+                'meta': meta
+            }
+
+        # Optionally convert to SimpleITK images
+        if as_nifti:
+            sitk_images = []
+            for arr in image_arrays:
+                sitk_img = sitk.GetImageFromArray(arr.astype(np.float32))
+                if 'spacing' in meta:
+                    sitk_img.SetSpacing(meta['spacing'])
+                if 'origin' in meta:
+                    sitk_img.SetOrigin(meta['origin'])
+                if 'direction' in meta:
+                    sitk_img.SetDirection(meta['direction'])
+                sitk_images.append(sitk_img)
+
+            sitk_rois = []
+            for arr in roi_arrays:
+                sitk_roi = sitk.GetImageFromArray(arr.astype(np.uint8))
+                if 'spacing' in meta:
+                    sitk_roi.SetSpacing(meta['spacing'])
+                if 'origin' in meta:
+                    sitk_roi.SetOrigin(meta['origin'])
+                if 'direction' in meta:
+                    sitk_roi.SetDirection(meta['direction'])
+                sitk_rois.append(sitk_roi)
+
+            sitk_labelmaps = []
+            for arr in labelmap_arrays:
+                sitk_lm = sitk.GetImageFromArray(arr.astype(np.uint8))
+                if 'spacing' in meta:
+                    sitk_lm.SetSpacing(meta['spacing'])
+                if 'origin' in meta:
+                    sitk_lm.SetOrigin(meta['origin'])
+                if 'direction' in meta:
+                    sitk_lm.SetDirection(meta['direction'])
+                sitk_labelmaps.append(sitk_lm)
+
+            return {
+                'images': sitk_images,
+                'rois': sitk_rois,
+                'labelmaps': sitk_labelmaps,
+                'meta': meta
+            }
+
+        # Optionally convert to pyable objects
+        if as_pyable:
+            py_images = []
+            for arr in image_arrays:
+                sitk_img = sitk.GetImageFromArray(arr.astype(np.float32))
+                if 'spacing' in meta:
+                    sitk_img.SetSpacing(meta['spacing'])
+                if 'origin' in meta:
+                    sitk_img.SetOrigin(meta['origin'])
+                if 'direction' in meta:
+                    sitk_img.SetDirection(meta['direction'])
+                py_images.append(SITKImaginable(image=sitk_img))
+
+            py_rois = []
+            for arr in roi_arrays:
+                sitk_roi = sitk.GetImageFromArray(arr.astype(np.uint8))
+                if 'spacing' in meta:
+                    sitk_roi.SetSpacing(meta['spacing'])
+                if 'origin' in meta:
+                    sitk_roi.SetOrigin(meta['origin'])
+                if 'direction' in meta:
+                    sitk_roi.SetDirection(meta['direction'])
+                py_rois.append(Roiable(image=sitk_roi))
+
+            py_labelmaps = []
+            for arr in labelmap_arrays:
+                sitk_lm = sitk.GetImageFromArray(arr.astype(np.uint8))
+                if 'spacing' in meta:
+                    sitk_lm.SetSpacing(meta['spacing'])
+                if 'origin' in meta:
+                    sitk_lm.SetOrigin(meta['origin'])
+                if 'direction' in meta:
+                    sitk_lm.SetDirection(meta['direction'])
+                py_labelmaps.append(LabelMapable(image=sitk_lm))
+
+            return {
+                'images': py_images,
+                'rois': py_rois,
+                'labelmaps': py_labelmaps,
+                'meta': meta
+            }
+
+        # Default: return numpy arrays
+        return {
+            'images': image_arrays,
+            'rois': roi_arrays,
+            'labelmaps': labelmap_arrays,
+            'meta': meta
+        }
     
     def _select_reference(self, images: List[SITKImaginable], item: dict) -> SITKImaginable:
         """Select reference image for subject."""
