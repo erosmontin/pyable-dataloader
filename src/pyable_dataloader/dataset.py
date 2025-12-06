@@ -527,14 +527,37 @@ class PyableDataset(Dataset):
             lm_copy.resampleOnTargetImage(reference)
             resampled_labelmaps.append(lm_copy)
         
-        # Apply transforms if provided
-        if self.transforms is not None:
-            resampled_images, resampled_rois, resampled_labelmaps = self.transforms(resampled_images, resampled_rois, resampled_labelmaps, meta)
+        # Collect metadata
+        meta = {
+            'subject_id': subject_id,
+            'spacing': reference.getImageSpacing(),
+            'origin': reference.getImageOrigin(),
+            'direction': reference.getImageDirection(),
+            'size': reference.getImageSize(),
+            'orientation': reference.getOrientationCode(),
+            'source_paths': {
+                'images': item.get('images', []),
+                'rois': item.get('rois', []),
+                'labelmaps': item.get('labelmaps', [])
+            }
+        }
+        if roi_center is not None:
+            meta['roi_center'] = roi_center
+        
+        # Add label if present
+        if 'label' in item:
+            meta['label'] = item['label']
         
         # Convert to numpy arrays (ZYX format in v3)
         image_arrays = [img.getImageAsNumpy() for img in resampled_images]
         roi_arrays = [roi.getImageAsNumpy() for roi in resampled_rois]
         labelmap_arrays = [lm.getImageAsNumpy() for lm in resampled_labelmaps]
+        
+        # Apply transforms if provided (before stacking)
+        if self.transforms is not None:
+            # For transforms, we need to handle the case where images might be stacked or not
+            # Pass the list of arrays and let transforms handle stacking/unstacking
+            image_arrays, roi_arrays, labelmap_arrays = self.transforms(image_arrays, roi_arrays, labelmap_arrays, meta)
         
         # Apply ROI masking if requested
         if self.mask_with_roi and roi_arrays:
@@ -550,26 +573,6 @@ class PyableDataset(Dataset):
             images_array = image_arrays[0]
         else:
             images_array = np.zeros(self.target_size)
-        
-        # Collect metadata
-        meta = {
-            'subject_id': subject_id,
-            'spacing': reference.getImageSpacing(),
-            'origin': reference.getImageOrigin(),
-            'direction': reference.getImageDirection(),
-            'size': reference.getImageSize(),
-            'orientation': reference.getOrientationCode(),
-            'source_paths': {
-                'images': item.get('images', []),
-                'rois': item.get('rois', []),
-                'labelmaps': item.get('labelmaps', [])
-            },
-            'roi_center': roi_center
-        }
-        
-        # Add label if present
-        if 'label' in item:
-            meta['label'] = item['label']
         
         # Save to cache
         self._save_to_cache(cache_path, images_array, roi_arrays, labelmap_arrays, meta)

@@ -17,6 +17,12 @@ A production-ready PyTorch Dataset for loading and preprocessing medical images 
 
 ## Installation
 
+### Prerequisites
+
+- Python 3.8+
+- PyTorch
+- SimpleITK (installed with pyable)
+
 ### 1. Install pyable (required dependency)
 
 ```bash
@@ -30,6 +36,22 @@ pip install -e .
 ```bash
 cd /path/to/able-dataloader
 pip install -e .
+```
+
+### 3. (Optional) Install development dependencies
+
+```bash
+pip install -e .[dev]
+```
+
+### Verification
+
+```bash
+# Test import
+python -c "from pyable_dataloader import PyableDataset; print('✅ Import successful!')"
+
+# Run tests
+pytest tests/ -v
 ```
 
 ## Quick Start
@@ -57,14 +79,108 @@ loader = DataLoader(
     pin_memory=True
 )
 
-# Iterate
-for batch in loader:
-    images = batch['images']      # B × C × D × H × W
-    labels = batch['label']        # B
-    meta = batch['meta']
+# Training loop
+for epoch in range(num_epochs):
+    for batch in loader:
+        images = batch['images']      # torch.Tensor: B × C × D × H × W
+        labels = batch['label']        # torch.Tensor: B (if present)
+        meta = batch['meta']          # dict with spacing, origin, etc.
+        
+        # Forward pass
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        
+        # Backward pass
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        print(f"Batch shape: {images.shape}, Loss: {loss.item():.4f}")
+```
+
+### Complete Training Example
+
+```python
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from pyable_dataloader import PyableDataset, Compose, IntensityNormalization, RandomFlip
+
+# Setup transforms
+train_transforms = Compose([
+    IntensityNormalization(method='zscore'),
+    RandomFlip(axes=[1, 2], prob=0.5)
+])
+
+# Create datasets
+train_dataset = PyableDataset(
+    manifest='data/train.json',
+    target_size=[64, 64, 64],
+    target_spacing=2.0,
+    transforms=train_transforms,
+    cache_dir='./cache/train'
+)
+
+val_dataset = PyableDataset(
+    manifest='data/val.json',
+    target_size=[64, 64, 64],
+    target_spacing=2.0,
+    cache_dir='./cache/val'
+)
+
+# Create dataloaders
+train_loader = DataLoader(
+    train_dataset, 
+    batch_size=8, 
+    shuffle=True, 
+    num_workers=4, 
+    pin_memory=True
+)
+
+val_loader = DataLoader(
+    val_dataset, 
+    batch_size=8, 
+    shuffle=False, 
+    num_workers=4, 
+    pin_memory=True
+)
+
+# Training loop
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = YourModel().to(device)
+optimizer = torch.optim.Adam(model.parameters())
+criterion = nn.CrossEntropyLoss()
+
+for epoch in range(100):
+    # Training
+    model.train()
+    train_loss = 0.0
+    for batch in train_loader:
+        images = batch['images'].to(device)
+        labels = batch['labels'].to(device)
+        
+        optimizer.zero_grad()
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        
+        train_loss += loss.item()
     
-    # Your training code here
-    print(f"Batch shape: {images.shape}")
+    # Validation
+    model.eval()
+    val_loss = 0.0
+    with torch.no_grad():
+        for batch in val_loader:
+            images = batch['images'].to(device)
+            labels = batch['labels'].to(device)
+            
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            val_loss += loss.item()
+    
+    print(f"Epoch {epoch+1}: Train Loss = {train_loss/len(train_loader):.4f}, "
+          f"Val Loss = {val_loss/len(val_loader):.4f}")
 ```
 
 ### Manifest Format
@@ -100,59 +216,184 @@ sub001,"['/data/sub001/T1.nii.gz','/data/sub001/T2.nii.gz']",/data/sub001/mask.n
 sub002,/data/sub002/T1.nii.gz,,,first,0.0
 ```
 
-## Advanced Usage
+## Architecture Overview
 
-### With ROI Masking and Centering
+### Data Flow Diagram
 
-```python
-dataset = PyableDataset(
-    manifest='data/manifest.json',
-    target_size=[64, 64, 64],
-    target_spacing=2.0,
-    mask_with_roi=True,              # Multiply image by ROI mask
-    roi_labels=[1, 34, 35],          # Filter specific label values
-    roi_center_target=[0, 0, 50],    # Center ROI at specific coordinates
-    stack_channels=True
-)
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          INPUT DATA                                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Manifest (JSON/CSV)              Medical Images (NIfTI/DICOM)         │
+│  ┌──────────────────┐             ┌──────────────┐                     │
+│  │ subject_001:     │             │ T1.nii.gz    │                     │
+│  │   images: [...]  │────────────>│ T2.nii.gz    │                     │
+│  │   rois: [...]    │             │ FLAIR.nii.gz │                     │
+│  │   label: 1.0     │             └──────────────┘                     │
+│  └──────────────────┘             ┌──────────────┐                     │
+│                                    │ roi.nii.gz   │                     │
+│                                    └──────────────┘                     │
+└─────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    PyableDataset.__getitem__(idx)                       │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Step 1: Load with pyable                                              │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ img = SITKImaginable(filename)                                   │  │
+│  │ roi = Roiable(filename)                                          │  │
+│  │ img.resampleOnCanonicalSpace()  # Ensures LPS orientation        │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                              │                                          │
+│                              ▼                                          │
+│  Step 2: Select Reference Space                                        │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ reference = select_reference(images)                             │  │
+│  │   - First image                                                  │  │
+│  │   - Largest image                                                │  │
+│  │   - Custom function                                              │  │
+│  │   - Global template                                              │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                              │                                          │
+│                              ▼                                          │
+│  Step 3: Compute ROI Center (if needed)                                │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ roi_center = compute_roi_center(roi)                             │  │
+│  │ # Physical coordinates (X, Y, Z) in mm                           │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                              │                                          │
+│                              ▼                                          │
+│  Step 4: Create Centered Reference                                     │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ centered_ref = create_centered_reference(                        │  │
+│  │     source_image,                                                │  │
+│  │     roi_center,                                                  │  │
+│  │     target_size,                                                 │  │
+│  │     target_spacing                                               │  │
+│  │ )                                                                │  │
+│  │ # Centers volume around ROI to maximize information              │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                              │                                          │
+│                              ▼                                          │
+│  Step 5: Resample All Images                                           │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ for img in images:                                               │  │
+│  │     img.resampleOnTargetImage(reference)                      │  │
+│  │     # Linear interpolation for images                            │  │
+│  │                                                                  │  │
+│  │ for roi in rois:                                                 │  │
+│  │     roi.resampleOnTargetImage(reference)                      │  │
+│  │     # Nearest-neighbor for labels (automatic!)                   │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                              │                                          │
+│                              ▼                                          │
+│  Step 6: Convert to NumPy                                              │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ arrays = [img.getImageAsNumpy() for img in images]              │  │
+│  │ # Returns (Z, Y, X) format - pyable v3 convention!              │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                              │                                          │
+│                              ▼                                          │
+│  Step 7: Apply ROI Masking (if enabled)                                │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ if mask_with_roi:                                                │  │
+│  │     combined_mask = np.any([roi > 0 for roi in rois], axis=0)   │  │
+│  │     images = [arr * combined_mask for arr in images]            │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                              │                                          │
+│                              ▼                                          │
+│  Step 8: Stack Channels (if enabled)                                   │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ if stack_channels and len(images) > 1:                           │  │
+│  │     images = np.stack(images, axis=0)  # C × Z × Y × X           │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                              │                                          │
+│                              ▼                                          │
+│  Step 9: Apply Transforms (if provided)                                │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ if transforms is not None:                                       │  │
+│  │     images, rois, labelmaps = transforms(                        │  │
+│  │         images, rois, labelmaps, meta                            │  │
+│  │     )                                                            │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                              │                                          │
+│                              ▼                                          │
+│  Step 10: Cache Results                                               │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ save_to_cache(cache_path, images, rois, labelmaps, meta)        │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                            OUTPUT                                       │
+├─────────────────────────────────────────────────────────────────────────┤
+│  {                                                                    │
+│    'id': 'subject_001',                                              │
+│    'images': torch.Tensor(C × D × H × W),                            │
+│    'rois': [torch.Tensor(D × H × W), ...],                           │
+│    'labelmaps': [torch.Tensor(D × H × W), ...],                      │
+│    'meta': {                                                         │
+│      'spacing': [2.0, 2.0, 2.0],                                     │
+│      'origin': [0.0, 0.0, 0.0],                                      │
+│      'direction': [...],                                             │
+│      ...                                                             │
+│    }                                                                 │
+│  }                                                                   │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### With Data Augmentation
+### Key Components
+
+- **PyableDataset**: Main dataset class with spatial awareness
+- **Transforms**: Composable augmentation pipeline
+- **Caching**: Content-based caching for performance
+- **Overlay**: Functions to map results back to original space
+
+## Advanced Usage
+
+### Data Augmentation
+
+Data augmentation is applied using composable transform classes. All transforms automatically preserve labels in ROIs and labelmaps using nearest-neighbor interpolation.
+
+#### Basic Data Augmentation Pipeline
 
 ```python
 from pyable_dataloader import (
-    Compose,
-    IntensityNormalization,
+    Compose, 
+    IntensityNormalization, 
+    RandomTranslation, 
     RandomFlip,
-    RandomRotation90,
-    RandomAffine,
-    RandomNoise
+    RandomRotation90
 )
 
 # Create augmentation pipeline
-train_transforms = Compose([
+transforms = Compose([
+    # Normalize intensity values
     IntensityNormalization(method='zscore'),
-    RandomFlip(axes=[1, 2], prob=0.5),
-    RandomRotation90(prob=0.3),
-    RandomAffine(
-        rotation_range=5.0,
-        zoom_range=(0.95, 1.05),
-        shift_range=2.0,
-        prob=0.5
-    ),
-    RandomNoise(std=0.01, prob=0.3)
+    
+    # Apply random spatial transformations
+    RandomTranslation(translation_range=[[-3,3], [-3,3], [-3,3]], prob=0.8),
+    RandomFlip(axes=[0, 1, 2], prob=0.5),
+    RandomRotation90(prob=0.3)
 ])
 
+# Apply to dataset
 dataset = PyableDataset(
-    manifest='data/train.json',
+    manifest='manifest.json',
     target_size=[64, 64, 64],
-    transforms=train_transforms,
-    cache_dir='cache/train'
+    target_spacing=2.0,
+    transforms=transforms,  # Augmentation pipeline
+    cache_dir='./cache/train'  # Cache augmented data
 )
 ```
 
-### With Advanced Spatial Transforms
+#### Advanced Spatial Augmentation
 
-New spatial transforms with **per-axis control** and **automatic label preservation**:
+For more sophisticated augmentation with per-axis control:
 
 ```python
 from pyable_dataloader import (
@@ -164,16 +405,16 @@ from pyable_dataloader import (
     RandomFlip
 )
 
-# Create advanced augmentation pipeline
-train_transforms = Compose([
+# Advanced pipeline with per-axis control
+advanced_transforms = Compose([
     IntensityNormalization(method='zscore'),
     
-    # Per-axis translation in mm
+    # Per-axis translation in mm (more control in Z direction)
     RandomTranslation(
         translation_range=[
             [-5, 5],   # X-axis: ±5mm
-            [-5, 5],   # Y-axis: ±5mm
-            [-3, 3]    # Z-axis: ±3mm
+            [-5, 5],   # Y-axis: ±5mm  
+            [-3, 3]    # Z-axis: ±3mm (less variation)
         ],
         prob=0.8
     ),
@@ -188,195 +429,148 @@ train_transforms = Compose([
         prob=0.7
     ),
     
-    # BSpline deformation for realistic warping
+    # Realistic deformation using BSpline
     RandomBSpline(
         mesh_size=(4, 4, 4),    # BSpline grid size
         magnitude=3.0,           # Maximum displacement in mm
         prob=0.5
     ),
     
-    RandomFlip(axes=[1, 2], prob=0.5)
+    RandomFlip(axes=[1, 2], prob=0.5)  # Flip Y and Z axes
 ])
 
 dataset = PyableDataset(
     manifest='data/train.json',
     target_size=[64, 64, 64],
-    transforms=train_transforms,
-    cache_dir='cache/train'
+    transforms=advanced_transforms
 )
-
-# Labels are automatically preserved using nearest-neighbor interpolation!
-# No need to manually configure interpolation for labelmaps/ROIs
 ```
 
-**Key Features of Spatial Transforms:**
-- ✅ **Per-axis control**: Different ranges for each axis
-- ✅ **Automatic label preservation**: Uses nearest-neighbor for labelmaps/ROIs
-- ✅ **Physical space**: Translation in mm, rotation in degrees
-- ✅ **Realistic deformations**: BSpline for smooth, anatomically-plausible warping
-
-### With Global Reference Space
+#### Training vs Validation Augmentation
 
 ```python
-# All subjects resampled to same reference space
+# Training transforms (with augmentation)
+train_transforms = Compose([
+    IntensityNormalization(method='zscore'),
+    RandomTranslation(translation_range=[[-3,3], [-3,3], [-3,3]], prob=0.8),
+    RandomFlip(axes=[0, 1, 2], prob=0.5)
+])
+
+# Validation transforms (no augmentation, just normalization)
+val_transforms = Compose([
+    IntensityNormalization(method='zscore')
+])
+
+train_dataset = PyableDataset(
+    manifest='train.json',
+    target_size=[64, 64, 64],
+    transforms=train_transforms
+)
+
+val_dataset = PyableDataset(
+    manifest='val.json', 
+    target_size=[64, 64, 64],
+    transforms=val_transforms
+)
+```
+
+### ROI-Centered Processing
+
+```python
 dataset = PyableDataset(
-    manifest='data/manifest.json',
+    manifest='manifest.json',
     target_size=[64, 64, 64],
     target_spacing=2.0,
-    reference_space='/data/templates/MNI152_2mm.nii.gz'
+    roi_center_target=[0, 0, 32],  # Center ROI at this physical coordinate
+    mask_with_roi=True,            # Mask images with ROI
+    roi_labels=[1, 2, 3]           # Only use these label values
 )
 ```
 
-Or create reference from parameters:
+### Multi-Modal Stacking
 
 ```python
-reference_params = {
-    'size': [64, 64, 64],
-    'spacing': [2.0, 2.0, 2.0],
-    'origin': [0.0, 0.0, 0.0],
-    'direction': (1,0,0, 0,1,0, 0,0,1)
-}
-
+# Stack T1, T2, FLAIR as channels
 dataset = PyableDataset(
-    manifest='data/manifest.json',
+    manifest='manifest.json',
     target_size=[64, 64, 64],
-    reference_space=reference_params
+    stack_channels=True  # Output: C × D × H × W where C = num_images
+)
+```
+
+### Caching for Performance
+
+```python
+dataset = PyableDataset(
+    manifest='manifest.json',
+    target_size=[64, 64, 64],
+    cache_dir='./cache',     # Cache directory
+    force_reload=False       # Use cached data when available
 )
 ```
 
 ### Overlay Results Back to Original Space
 
 ```python
-# During inference
-dataset = PyableDataset(
-    manifest='test.json',
-    target_size=[64, 64, 64],
-    return_meta=True
-)
-
-# Get sample
-sample = dataset[0]
-images = sample['images']
-subject_id = sample['id']
-
-# Run model
-with torch.no_grad():
-    prediction = model(images.unsqueeze(0))
-
 # Get overlayer function
 overlayer = dataset.get_original_space_overlayer(subject_id)
 
 # Overlay prediction back to original space
-prediction_np = prediction[0, 0].cpu().numpy()  # Remove batch and channel dims
-original_space_sitk = overlayer(prediction_np, interpolator='linear')
+original_space_sitk = overlayer(prediction_array, interpolator='linear')
 
 # Save result
 import SimpleITK as sitk
 sitk.WriteImage(original_space_sitk, f'results/{subject_id}_prediction.nii.gz')
 ```
 
-## PyFE Integration
-
-**pyable-dataloader** can also be used with **pyfe** (feature extraction / radiomics):
-
-### Using from pyfe
-
-```python
-# Import directly from pyfe
-from pyfe.dataloader import (
-    PyableDataset,
-    Compose,
-    RandomTranslation,
-    RandomRotation,
-    RandomBSpline
-)
-
-# Use the same API!
-dataset = PyableDataset(
-    manifest='data/manifest.json',
-    target_size=[64, 64, 64],
-    transforms=Compose([
-        RandomTranslation(translation_range=[[-3, 3], [-3, 3], [-2, 2]], prob=0.5),
-        RandomRotation(rotation_range=[[-5, 5], [-5, 5], [-10, 10]], prob=0.5)
-    ])
-)
-```
-
-### Converting Manifest for pyfe
-
-```python
-from pyable_dataloader.pyfe_adapter import convert_manifest_to_pyfe
-
-# Convert pyable manifest to pyfe format
-convert_manifest_to_pyfe(
-    input_manifest='data/manifest.json',
-    output_path='data/pyfe_manifest.json'
-)
-
-# Now use with pyfe
-from pyfe import pyfe
-
-result, ids = pyfe.exrtactMyFeatures(
-    'data/pyfe_manifest.json',
-    dimension=3
-)
-
-# Convert to pandas DataFrame
-df = pyfe.exrtactMyFeaturesToPandas(result, ids)
-```
-
-**Dual Usage:**
-- Same codebase for **PyTorch training** (deep learning)
-- And **pyfe feature extraction** (radiomics/handcrafted features)
-- Share data preprocessing pipeline across both workflows!
-
-## Examples
-
-See `examples/` directory for complete examples:
-
-- `example_basic_usage.py` - Simple dataset loading
-- `example_with_transforms.py` - Data augmentation pipeline
-- `example_classification.py` - Full classification workflow
-- `example_segmentation.py` - Segmentation with overlay
-- `example_pytorch_and_pyfe.py` - Complete dual usage example (PyTorch + pyfe)
-
 ## API Reference
 
 ### PyableDataset
 
-Main dataset class for loading medical images.
+```python
+PyableDataset(
+    manifest: Union[str, dict, List[str]],
+    target_size: List[int],
+    target_spacing: Union[float, List[float]] = 1.0,
+    reference_selector: Union[str, int, Callable] = 'first',
+    reference_space: Optional[Union[str, dict]] = None,
+    roi_center_target: Optional[List[float]] = None,
+    mask_with_roi: bool = False,
+    roi_labels: Optional[List[int]] = None,
+    transforms: Optional[Callable] = None,
+    stack_channels: bool = True,
+    cache_dir: Optional[str] = None,
+    force_reload: bool = False,
+    dtype: torch.dtype = torch.float32,
+    return_meta: bool = True,
+    orientation: str = 'LPS'
+)
+```
 
 **Parameters:**
-
-- `manifest` (str, dict, or list): Path to manifest file or manifest dict
-- `target_size` (list): Target voxel dimensions [D, H, W]
-- `target_spacing` (float or list): Target spacing in mm
-- `reference_selector` (str, int, or callable): How to select reference image
-  - `'first'`: Use first image (default)
-  - `'largest'`: Use largest image by volume
-  - `int`: Use image at index
-  - `callable`: Custom function
-- `reference_space` (str or dict, optional): Global reference space
-- `roi_center_target` (list, optional): Target coordinates for ROI center
-- `mask_with_roi` (bool): Whether to mask image with ROI
-- `roi_labels` (list, optional): Label values to keep in ROI
-- `transforms` (callable, optional): Augmentation pipeline
-- `stack_channels` (bool): Stack multiple images as channels
-- `cache_dir` (str, optional): Directory for caching
-- `force_reload` (bool): Force reload instead of using cache
-- `dtype` (torch.dtype): Output tensor dtype
-- `return_meta` (bool): Include metadata in output
-- `orientation` (str): Standard orientation code (default 'LPS')
+- `manifest`: Path to JSON/CSV file(s) or dict with subject data
+- `target_size`: Target voxel dimensions [D, H, W]
+- `target_spacing`: Target spacing in mm (float or [x,y,z])
+- `reference_selector`: How to choose reference image ('first', 'largest', int, callable)
+- `reference_space`: Global reference space (path to image or dict)
+- `roi_center_target`: Target physical coordinates for ROI center
+- `mask_with_roi`: Whether to multiply images by ROI mask
+- `roi_labels`: List of label values to keep in ROI
+- `transforms`: Optional transform pipeline
+- `stack_channels`: Stack multiple images as channels
+- `cache_dir`: Directory for caching preprocessed data
+- `force_reload`: Force reload from disk instead of cache
+- `dtype`: PyTorch dtype for output tensors
+- `return_meta`: Include metadata in output
+- `orientation`: Standard orientation code
 
 **Returns:**
-
-Dictionary with keys:
+Dictionary with:
 - `'id'`: Subject identifier
-- `'images'`: torch.Tensor (C × D × H × W)
-- `'rois'`: List[torch.Tensor]
-- `'labelmaps'`: List[torch.Tensor]
-- `'label'`: torch.Tensor (if present in manifest)
-- `'meta'`: dict (if return_meta=True)
+- `'images'`: torch.Tensor (C × D × H × W or D × H × W)
+- `'rois'`: List[torch.Tensor] (each D × H × W)
+- `'labelmaps'`: List[torch.Tensor] (each D × H × W)
+- `'meta'`: dict with spacing, origin, direction, etc. (if return_meta=True)
 
 ### Transforms
 
@@ -386,176 +580,165 @@ All transforms follow the interface:
 def __call__(images, rois, labelmaps, meta) -> (images, rois, labelmaps)
 ```
 
-Available transforms:
-
 #### Intensity Transforms
-- **`IntensityNormalization`**: Z-score, min-max, or percentile normalization
-  ```python
-  IntensityNormalization(method='zscore')  # or 'minmax', 'percentile'
-  ```
-- **`RandomNoise`**: Add Gaussian noise
-  ```python
-  RandomNoise(std=0.01, prob=0.3)
-  ```
 
-#### Spatial Transforms (with automatic label preservation)
-- **`RandomTranslation`**: Per-axis translation in mm
-  ```python
-  RandomTranslation(
-      translation_range=[[-5, 5], [-5, 5], [-3, 3]],  # [X, Y, Z] ranges
-      prob=0.8
-  )
-  ```
-- **`RandomRotation`**: Per-axis rotation in degrees
-  ```python
-  RandomRotation(
-      rotation_range=[[-10, 10], [-10, 10], [-15, 15]],  # [X, Y, Z] ranges
-      prob=0.7
-  )
-  ```
-- **`RandomBSpline`**: BSpline deformation
-  ```python
-  RandomBSpline(
-      mesh_size=(4, 4, 4),      # BSpline grid size
-      magnitude=3.0,             # Maximum displacement in mm
-      prob=0.5
-  )
-  ```
-- **`RandomAffine`**: Combined rotation, zoom, shift (supports per-axis or scalar ranges)
-  ```python
-  # Scalar ranges (applied to all axes)
-  RandomAffine(rotation_range=10.0, zoom_range=(0.9, 1.1), shift_range=3.0, prob=0.5)
-  
-  # Per-axis ranges
-  RandomAffine(
-      rotation_range=[[-5, 5], [-5, 5], [-10, 10]],
-      zoom_range=[(0.9, 1.1), (0.9, 1.1), (0.85, 1.15)],
-      shift_range=[[-3, 3], [-3, 3], [-5, 5]],
-      prob=0.5
-  )
-  ```
-- **`RandomFlip`**: Random axis flipping
-  ```python
-  RandomFlip(axes=[1, 2], prob=0.5)  # Flip Y and Z axes
-  ```
-- **`RandomRotation90`**: Random 90° rotations
-  ```python
-  RandomRotation90(prob=0.3)
-  ```
-
-#### Geometric Transforms
-- **`CropOrPad`**: Crop or pad to target size
-  ```python
-  CropOrPad(target_size=[64, 64, 64])
-  ```
-
-#### Composition
-- **`Compose`**: Chain multiple transforms
-  ```python
-  Compose([transform1, transform2, transform3])
-  ```
-
-**Note:** All spatial transforms automatically preserve labels in ROIs and labelmaps using nearest-neighbor interpolation. No manual configuration needed!
-
-## Important Notes
-
-### NumPy Array Ordering
-
-This package uses **pyable v3** which returns arrays in **(Z, Y, X)** order (standard numpy convention for medical images). This matches PyTorch's **(D, H, W)** format.
-
-### Label Preservation
-
-ROIs and labelmaps are automatically resampled with **nearest-neighbor interpolation** to preserve discrete label values. No manual configuration needed!
-
-### Caching
-
-Preprocessed data is cached to disk for faster loading. Cache keys include:
-- Subject ID
-- File modification times
-- Target size and spacing
-- ROI settings
-
-Clear cache by deleting the `cache_dir` or using `force_reload=True`.
-
-## Coordinate Systems
-
-The package handles coordinate systems correctly:
-
-1. **Physical Space**: Real-world coordinates in mm (X, Y, Z)
-2. **Array Space**: Numpy array indices (Z, Y, X) = (D, H, W)
-3. **ITK Space**: SimpleITK indices (i, j, k) = (X, Y, Z)
-
-pyable handles conversions automatically via:
-- `getPhysicalPointFromArrayIndex(k, j, i)`
-- `getArrayIndexFromPhysicalPoint(x, y, z)`
-
-## Performance Tips
-
-1. **Use caching** for training to avoid recomputing preprocessing
-2. **Use multiple workers** in DataLoader (`num_workers=4`)
-3. **Enable pin_memory** for GPU training
-4. **Persistent workers** for faster epoch transitions
-5. **Pre-compute reference space** if using the same for all subjects
-
+**IntensityNormalization**: Standardize image intensities
 ```python
-loader = DataLoader(
-    dataset,
-    batch_size=4,
-    shuffle=True,
-    num_workers=4,
-    pin_memory=True,
-    persistent_workers=True
+IntensityNormalization(
+    method: str = 'zscore',  # 'zscore', 'minmax', 'percentile'
+    per_channel: bool = True,
+    clip_percentile: Tuple[float, float] = (1, 99)
 )
 ```
 
-## Troubleshooting
+#### Spatial Transforms (with automatic label preservation)
 
-### Out of Memory
-
-- Reduce `target_size`
-- Reduce `batch_size`
-- Use fewer `num_workers`
-- Enable caching to avoid duplicate loading
-
-### Slow Loading
-
-- Enable caching with `cache_dir`
-- Increase `num_workers`
-- Use SSD storage for cache
-- Consider pre-computing all preprocessing
-
-### Label Interpolation
-
-If you see non-integer values in ROIs/labelmaps, check:
-- Are you using the correct class? (`Roiable` or `LabelMapable`)
-- Is the pixel type integer? (uint8, int16, etc.)
-- pyable v3 automatically uses nearest-neighbor for integer images
-
-## Citation
-
-If you use this package, please cite:
-
-```bibtex
-@software{pyable_dataloader,
-  title = {PyAble DataLoader: Medical Image Loading for PyTorch},
-  author = {Montin, Eros},
-  year = {2025},
-  url = {https://github.com/erosmontin/able-dataloader}
-}
+**RandomTranslation**: Translate images in physical space
+```python
+RandomTranslation(
+    translation_range: List[Tuple[float, float]] = [[-5,5], [-5,5], [-5,5]],  # [X, Y, Z] ranges in mm
+    prob: float = 0.5
+)
 ```
+
+**RandomRotation**: Rotate images around axes
+```python
+RandomRotation(
+    rotation_range: List[Tuple[float, float]] = [[-10,10], [-10,10], [-10,10]],  # [X, Y, Z] ranges in degrees
+    prob: float = 0.5
+)
+```
+
+**RandomBSpline**: Apply realistic elastic deformation
+```python
+RandomBSpline(
+    mesh_size: Tuple[int, int, int] = (4, 4, 4),  # BSpline grid size
+    magnitude: float = 3.0,                        # Maximum displacement in mm
+    prob: float = 0.5
+)
+```
+
+**RandomFlip**: Randomly flip along axes
+```python
+RandomFlip(
+    axes: List[int] = [0, 1, 2],  # 0=Z/D, 1=Y/H, 2=X/W
+    prob: float = 0.5
+)
+```
+
+**RandomRotation90**: Random 90° rotations
+```python
+RandomRotation90(prob: float = 0.5)
+```
+
+#### Composition
+
+**Compose**: Chain multiple transforms together
+```python
+Compose(transforms: List[MedicalImageTransform])
+```
+
+#### Example: Complete Augmentation Pipeline
+
+```python
+from pyable_dataloader import *
+
+# Complete augmentation pipeline
+transforms = Compose([
+    # Intensity normalization
+    IntensityNormalization(method='zscore', per_channel=True),
+    
+    # Spatial augmentations
+    RandomTranslation(translation_range=[[-3, 3], [-3, 3], [-2, 2]], prob=0.8),
+    RandomRotation(rotation_range=[[-5, 5], [-5, 5], [-10, 10]], prob=0.6),
+    RandomFlip(axes=[1, 2], prob=0.5),  # Don't flip Z-axis for brain data
+    
+    # Elastic deformation
+    RandomBSpline(mesh_size=(3, 3, 3), magnitude=2.0, prob=0.3)
+])
+
+dataset = PyableDataset(
+    manifest='train.json',
+    target_size=[64, 64, 64],
+    transforms=transforms
+)
+```
+
+## Migration from Original Code
+
+If you're migrating from the original `UnifiedNiftiDataset`:
+
+### Key Changes
+
+1. **Manifest Format**: Use JSON instead of separate CSV files
+2. **ROI Labels**: Specify `roi_labels` explicitly instead of morphology operations
+3. **Transforms**: Use composable transform classes instead of hardcoded functions
+4. **Caching**: Automatic content-based caching (no manual cache keys)
+5. **Label Preservation**: Automatic with `Roiable`/`LabelMapable`
+
+### Before (Original)
+
+```python
+dataset = UnifiedNiftiDataset(
+    csv_file='train2.csv',
+    target_size=[50, 50, 50],
+    csv_roi_file='trainROI2.csv',
+    target_spacing=2.0,
+    mask_with_roi=True,
+    roi_morphology='dilate',
+    roi_morphology_radius=3,
+    femur_z_target=None,
+    augmentation=False,
+    force_reload=False,
+    cache_dir='tmp',
+    return_transform=False
+)
+```
+
+### After (New)
+
+```python
+from pyable_dataloader import PyableDataset, Compose, RandomFlip, IntensityNormalization
+
+transforms = Compose([
+    IntensityNormalization(method='zscore'),
+    RandomFlip(axes=[1, 2], prob=0.5)
+])
+
+dataset = PyableDataset(
+    manifest='manifest.json',  # Converted from your CSV
+    target_size=[50, 50, 50],
+    target_spacing=2.0,
+    mask_with_roi=True,
+    roi_labels=[1, 34, 35],  # Explicit labels
+    roi_center_target=[0, 0, 50],  # Replace femur_z_target
+    transforms=transforms,  # Composable transforms
+    cache_dir='cache'
+)
+```
+
+## Testing
+
+Run the test suite:
+
+```bash
+pytest tests/ -v
+```
+
+## Examples
+
+See the `examples/` directory for complete examples:
+
+- `example_unified_nifti_style.py`: Replicates original UnifiedNiftiDataset workflow
+- `example_pytorch_and_pyfe.py`: Integration with pyfe for feature extraction
+
+## Contributing
+
+1. Install development dependencies: `pip install -e .[dev]`
+2. Run tests: `pytest`
+3. Format code: `black src/ tests/`
+4. Check types: `mypy src/`
 
 ## License
 
 MIT License
-
-## Contributing
-
-Contributions welcome! Please open an issue or pull request.
-
-## Related Projects
-
-- **pyable**: Core medical imaging library
-- **PyTorch**: Deep learning framework
-- **SimpleITK**: Medical image processing
-- **MONAI**: Medical imaging AI framework
-- **TorchIO**: PyTorch transforms for medical images

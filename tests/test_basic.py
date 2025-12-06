@@ -193,8 +193,8 @@ def test_dataset_with_pyable_transform(temp_dataset):
     )
 
     sample = dataset[0]
-    lm = sample['labelmaps'][0].numpy()
-    unique_vals = np.unique(lm)
+    roi = sample['rois'][0].numpy()
+    unique_vals = np.unique(roi)
     assert all(v in [0, 1] for v in unique_vals)
 
 
@@ -210,13 +210,11 @@ def test_intensity_normalization():
     images_norm, _, _ = transform(images, rois, labelmaps, meta)
     
     # Check that mean ≈ 0 and std ≈ 1
-    mask = images_norm > 0
-    if np.any(mask):
-        mean = images_norm[mask].mean()
-        std = images_norm[mask].std()
-        
-        assert abs(mean) < 0.1, f"Mean not close to 0: {mean}"
-        assert abs(std - 1.0) < 0.1, f"Std not close to 1: {std}"
+    mean = images_norm.mean()
+    std = images_norm.std()
+    
+    assert abs(mean) < 0.1, f"Mean not close to 0: {mean}"
+    assert abs(std - 1.0) < 0.1, f"Std not close to 1: {std}"
 
 
 def test_random_flip():

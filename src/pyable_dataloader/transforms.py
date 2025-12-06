@@ -80,6 +80,21 @@ class IntensityNormalization(MedicalImageTransform):
         self.clip_percentile = clip_percentile
     
     def __call__(self, images, rois, labelmaps, meta):
+        # Handle both single array and list of arrays
+        if isinstance(images, list):
+            # List of arrays (each Z × Y × X)
+            normalized_images = []
+            for img in images:
+                normalized = self._normalize_single_image(img)
+                normalized_images.append(normalized)
+            images = normalized_images
+        else:
+            # Single stacked array (C × Z × Y × X or Z × Y × X)
+            images = self._normalize_single_image(images)
+        
+        return images, rois, labelmaps
+    
+    def _normalize_single_image(self, images):
         if images.ndim == 3:
             # Single channel, add channel dim
             images = images[np.newaxis, ...]
@@ -119,7 +134,7 @@ class IntensityNormalization(MedicalImageTransform):
         if was_3d:
             images = images[0]
         
-        return images, rois, labelmaps
+        return images
 
 
 class RandomFlip(MedicalImageTransform):
@@ -138,20 +153,28 @@ class RandomFlip(MedicalImageTransform):
     def __call__(self, images, rois, labelmaps, meta):
         for axis in self.axes:
             if np.random.rand() < self.prob:
-                # Flip images
-                if images.ndim == 4:
-                    # C × Z × Y × X: axis + 1 to account for channel
-                    images = np.flip(images, axis=axis + 1)
+                # Handle both single array and list of arrays
+                if isinstance(images, list):
+                    # List of arrays
+                    images = [np.flip(img, axis=axis) for img in images]
                 else:
-                    # Z × Y × X
-                    images = np.flip(images, axis=axis)
+                    # Single stacked array
+                    if images.ndim == 4:
+                        # C × Z × Y × X: axis + 1 to account for channel
+                        images = np.flip(images, axis=axis + 1)
+                    else:
+                        # Z × Y × X
+                        images = np.flip(images, axis=axis)
                 
                 # Flip ROIs and labelmaps
                 rois = [np.flip(roi, axis=axis) for roi in rois]
                 labelmaps = [np.flip(lm, axis=axis) for lm in labelmaps]
         
         # Make contiguous
-        images = np.ascontiguousarray(images)
+        if isinstance(images, list):
+            images = [np.ascontiguousarray(img) for img in images]
+        else:
+            images = np.ascontiguousarray(images)
         rois = [np.ascontiguousarray(roi) for roi in rois]
         labelmaps = [np.ascontiguousarray(lm) for lm in labelmaps]
         
@@ -284,18 +307,35 @@ class RandomAffine(MedicalImageTransform):
                 ref = SITKImaginable(image=imgref)
 
             # Convert and apply transform per channel/element
-            transformed_images = []
-            if images.ndim == 4:
-                for c in range(images.shape[0]):
-                    img = SITKImaginable()
-                    img.setImageFromNumpy(images[c], refimage=ref.getImage() if ref else None)
-                    img.rotateImage(rotation, translation=shift, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
-                    transformed_images.append(img.getImageAsNumpy())
+            if isinstance(images, list):
+                # List of arrays (each Z × Y × X)
+                transformed_images = []
+                for img in images:
+                    img_copy = SITKImaginable()
+                    img_copy.setImageFromNumpy(img, refimage=ref.getImage() if ref else None)
+                    img_copy.rotateImage(rotation, translation=shift, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
+                    transformed_images.append(img_copy.getImageAsNumpy())
+                images = transformed_images
             else:
-                img = SITKImaginable()
-                img.setImageFromNumpy(images, refimage=ref.getImage() if ref else None)
-                img.rotateImage(rotation, translation=shift, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
-                transformed_images = [img.getImageAsNumpy()]
+                # Single stacked array
+                transformed_images = []
+                if images.ndim == 4:
+                    for c in range(images.shape[0]):
+                        img = SITKImaginable()
+                        img.setImageFromNumpy(images[c], refimage=ref.getImage() if ref else None)
+                        img.rotateImage(rotation, translation=shift, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
+                        transformed_images.append(img.getImageAsNumpy())
+                else:
+                    img = SITKImaginable()
+                    img.setImageFromNumpy(images, refimage=ref.getImage() if ref else None)
+                    img.rotateImage(rotation, translation=shift, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
+                    transformed_images = [img.getImageAsNumpy()]
+
+                # Stack channels if needed
+                if images.ndim == 4:
+                    images = np.stack(transformed_images, axis=0)
+                else:
+                    images = transformed_images[0]
 
             # Apply nearest-neighbor transforms to rois and labelmaps
             transformed_rois = []
@@ -311,12 +351,6 @@ class RandomAffine(MedicalImageTransform):
                 l.setImageFromNumpy(lm, refimage=ref.getImage() if ref else None)
                 l.rotateImage(rotation, translation=shift, interpolator=sitk.sitkNearestNeighbor, reference_image=ref.getImage() if ref else None)
                 transformed_labelmaps.append(l.getImageAsNumpy())
-
-            # Stack channels if needed
-            if images.ndim == 4:
-                images = np.stack(transformed_images, axis=0)
-            else:
-                images = transformed_images[0]
 
             rois = transformed_rois
             labelmaps = transformed_labelmaps
@@ -415,47 +449,84 @@ class RandomTranslation(MedicalImageTransform):
             # Can't apply label-preserving transform, skip
             return images, rois, labelmaps
 
-        # Create reference
-        ref = None
-        if meta and 'spacing' in meta and 'size' in meta and 'origin' in meta and 'direction' in meta:
-            imgref = sitk.Image(meta['size'], sitk.sitkFloat32)
-            imgref.SetSpacing(meta['spacing'])
-            imgref.SetOrigin(meta['origin'])
-            imgref.SetDirection(meta['direction'])
-            ref = SITKImaginable(image=imgref)
-
         # Sample per-axis translations in mm
         t = [np.random.uniform(low, high) for (low, high) in self.translation_range]
 
-        transformed_images = []
-        if images.ndim == 4:
-            for c in range(images.shape[0]):
-                img = SITKImaginable()
-                img.setImageFromNumpy(images[c], refimage=ref.getImage() if ref else None)
-                img.translateImage(t, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
-                transformed_images.append(img.getImageAsNumpy())
-            images = np.stack(transformed_images, axis=0)
+        # Check if images is list of pyable objects or numpy arrays
+        if isinstance(images, list) and images and hasattr(images[0], 'getImage'):
+            # Apply to pyable objects
+            transformed_images = []
+            for img in images:
+                img_copy = SITKImaginable(image=sitk.Image(img.getImage()))
+                img_copy.translateImage(t, interpolator=sitk.sitkLinear)
+                transformed_images.append(img_copy)
+            images = transformed_images
+
+            transformed_rois = []
+            for roi in rois:
+                roi_copy = Roiable(image=sitk.Image(roi.getImage()))
+                roi_copy.translateImage(t, interpolator=sitk.sitkNearestNeighbor)
+                transformed_rois.append(roi_copy)
+            rois = transformed_rois
+
+            transformed_labelmaps = []
+            for lm in labelmaps:
+                lm_copy = LabelMapable(image=sitk.Image(lm.getImage()))
+                lm_copy.translateImage(t, interpolator=sitk.sitkNearestNeighbor)
+                transformed_labelmaps.append(lm_copy)
+            labelmaps = transformed_labelmaps
         else:
-            img = SITKImaginable()
-            img.setImageFromNumpy(images, refimage=ref.getImage() if ref else None)
-            img.translateImage(t, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
-            images = img.getImageAsNumpy()
+            # Handle numpy arrays (single array or list of arrays)
+            # Create reference
+            ref = None
+            if meta and 'spacing' in meta and 'size' in meta and 'origin' in meta and 'direction' in meta:
+                imgref = sitk.Image(meta['size'], sitk.sitkFloat32)
+                imgref.SetSpacing(meta['spacing'])
+                imgref.SetOrigin(meta['origin'])
+                imgref.SetDirection(meta['direction'])
+                ref = SITKImaginable(image=imgref)
 
-        transformed_rois = []
-        for roi in rois:
-            l = LabelMapable()
-            l.setImageFromNumpy(roi, refimage=ref.getImage() if ref else None)
-            l.translateImage(t, interpolator=sitk.sitkNearestNeighbor, reference_image=ref.getImage() if ref else None)
-            transformed_rois.append(l.getImageAsNumpy())
-        rois = transformed_rois
+            if isinstance(images, list):
+                # List of arrays (each Z × Y × X)
+                transformed_images = []
+                for img in images:
+                    img_copy = SITKImaginable()
+                    img_copy.setImageFromNumpy(img, refimage=ref.getImage() if ref else None)
+                    img_copy.translateImage(t, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
+                    transformed_images.append(img_copy.getImageAsNumpy())
+                images = transformed_images
+            else:
+                # Single stacked array
+                transformed_images = []
+                if images.ndim == 4:
+                    for c in range(images.shape[0]):
+                        img = SITKImaginable()
+                        img.setImageFromNumpy(images[c], refimage=ref.getImage() if ref else None)
+                        img.translateImage(t, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
+                        transformed_images.append(img.getImageAsNumpy())
+                    images = np.stack(transformed_images, axis=0)
+                else:
+                    img = SITKImaginable()
+                    img.setImageFromNumpy(images, refimage=ref.getImage() if ref else None)
+                    img.translateImage(t, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
+                    images = img.getImageAsNumpy()
 
-        transformed_labelmaps = []
-        for lm in labelmaps:
-            l = LabelMapable()
-            l.setImageFromNumpy(lm, refimage=ref.getImage() if ref else None)
-            l.translateImage(t, interpolator=sitk.sitkNearestNeighbor, reference_image=ref.getImage() if ref else None)
-            transformed_labelmaps.append(l.getImageAsNumpy())
-        labelmaps = transformed_labelmaps
+            # Transform ROIs and labelmaps
+            transformed_rois = []
+            for roi in rois:
+                l = LabelMapable()
+                l.setImageFromNumpy(roi, refimage=ref.getImage() if ref else None)
+                l.translateImage(t, interpolator=sitk.sitkNearestNeighbor, reference_image=ref.getImage() if ref else None)
+                transformed_rois.append(l.getImageAsNumpy())
+            rois = transformed_rois
+
+            transformed_labelmaps = []
+            for lm in labelmaps:
+                l = LabelMapable()
+                l.setImageFromNumpy(lm, refimage=ref.getImage() if ref else None)
+                l.translateImage(t, interpolator=sitk.sitkNearestNeighbor, reference_image=ref.getImage() if ref else None)
+                transformed_labelmaps.append(l.getImageAsNumpy())
+            labelmaps = transformed_labelmaps
 
         return images, rois, labelmaps
 
@@ -490,19 +561,33 @@ class RandomRotation(MedicalImageTransform):
         # Sample rotations per axis
         rotation = [np.random.uniform(low, high) for (low, high) in self.rotation_range]
 
-        transformed_images = []
-        if images.ndim == 4:
-            for c in range(images.shape[0]):
-                img = SITKImaginable()
-                img.setImageFromNumpy(images[c], refimage=ref.getImage() if ref else None)
-                img.rotateImage(rotation, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
-                transformed_images.append(img.getImageAsNumpy())
-            images = np.stack(transformed_images, axis=0)
+        # Sample rotations per axis
+        rotation = [np.random.uniform(low, high) for (low, high) in self.rotation_range]
+
+        if isinstance(images, list):
+            # List of arrays (each Z × Y × X)
+            transformed_images = []
+            for img in images:
+                img_copy = SITKImaginable()
+                img_copy.setImageFromNumpy(img, refimage=ref.getImage() if ref else None)
+                img_copy.rotateImage(rotation, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
+                transformed_images.append(img_copy.getImageAsNumpy())
+            images = transformed_images
         else:
-            img = SITKImaginable()
-            img.setImageFromNumpy(images, refimage=ref.getImage() if ref else None)
-            img.rotateImage(rotation, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
-            images = img.getImageAsNumpy()
+            # Single stacked array
+            transformed_images = []
+            if images.ndim == 4:
+                for c in range(images.shape[0]):
+                    img = SITKImaginable()
+                    img.setImageFromNumpy(images[c], refimage=ref.getImage() if ref else None)
+                    img.rotateImage(rotation, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
+                    transformed_images.append(img.getImageAsNumpy())
+                images = np.stack(transformed_images, axis=0)
+            else:
+                img = SITKImaginable()
+                img.setImageFromNumpy(images, refimage=ref.getImage() if ref else None)
+                img.rotateImage(rotation, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
+                images = img.getImageAsNumpy()
 
         transformed_rois = []
         for roi in rois:
@@ -564,19 +649,30 @@ class RandomBSpline(MedicalImageTransform):
         bs.SetParameters(params)
 
         # Apply to images and labelmaps
-        transformed_images = []
-        if images.ndim == 4:
-            for c in range(images.shape[0]):
-                img = SITKImaginable()
-                img.setImageFromNumpy(images[c], refimage=ref.getImage())
-                img.applyTransform(bs, target_image=ref.getImage(), interpolator='linear')
-                transformed_images.append(img.getImageAsNumpy())
-            images = np.stack(transformed_images, axis=0)
+        if isinstance(images, list):
+            # List of arrays (each Z × Y × X)
+            transformed_images = []
+            for img in images:
+                img_copy = SITKImaginable()
+                img_copy.setImageFromNumpy(img, refimage=ref.getImage())
+                img_copy.applyTransform(bs, target_image=ref.getImage(), interpolator='linear')
+                transformed_images.append(img_copy.getImageAsNumpy())
+            images = transformed_images
         else:
-            img = SITKImaginable()
-            img.setImageFromNumpy(images, refimage=ref.getImage())
-            img.applyTransform(bs, target_image=ref.getImage(), interpolator='linear')
-            images = img.getImageAsNumpy()
+            # Single stacked array
+            transformed_images = []
+            if images.ndim == 4:
+                for c in range(images.shape[0]):
+                    img = SITKImaginable()
+                    img.setImageFromNumpy(images[c], refimage=ref.getImage())
+                    img.applyTransform(bs, target_image=ref.getImage(), interpolator='linear')
+                    transformed_images.append(img.getImageAsNumpy())
+                images = np.stack(transformed_images, axis=0)
+            else:
+                img = SITKImaginable()
+                img.setImageFromNumpy(images, refimage=ref.getImage())
+                img.applyTransform(bs, target_image=ref.getImage(), interpolator='linear')
+                images = img.getImageAsNumpy()
 
         transformed_rois = []
         for roi in rois:
