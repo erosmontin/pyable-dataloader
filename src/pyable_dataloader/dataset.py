@@ -80,8 +80,8 @@ class PyableDataset(Dataset):
         
         roi_labels: List of label values to keep in ROI (None = keep all)
         
-        transforms: Callable(images, rois, labelmaps, meta) -> (images, rois, labelmaps)
-            Applied after resampling to reference space
+        transforms: Optional[Callable] = None,
+            Applied after resampling to reference space on Imaginable objects
         
         stack_channels: If True, stack multiple images as channels (C × D × H × W)
         
@@ -527,6 +527,10 @@ class PyableDataset(Dataset):
             lm_copy.resampleOnTargetImage(reference)
             resampled_labelmaps.append(lm_copy)
         
+        # Apply transforms if provided
+        if self.transforms is not None:
+            resampled_images, resampled_rois, resampled_labelmaps = self.transforms(resampled_images, resampled_rois, resampled_labelmaps, meta)
+        
         # Convert to numpy arrays (ZYX format in v3)
         image_arrays = [img.getImageAsNumpy() for img in resampled_images]
         roi_arrays = [roi.getImageAsNumpy() for roi in resampled_rois]
@@ -581,15 +585,11 @@ class PyableDataset(Dataset):
         return self._format_output(subject_id, result, item)
     
     def _format_output(self, subject_id: str, data: dict, item: dict) -> dict:
-        """Format output with transforms and proper tensor conversion."""
+        """Format output with proper tensor conversion."""
         images = data['images']
         rois = data['rois']
         labelmaps = data['labelmaps']
         meta = data['meta']
-        
-        # Apply transforms if provided
-        if self.transforms is not None:
-            images, rois, labelmaps = self.transforms(images, rois, labelmaps, meta)
         
         # Convert to PyTorch tensors
         images_tensor = torch.from_numpy(images).to(self.dtype)
