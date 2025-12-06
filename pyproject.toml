@@ -33,6 +33,7 @@ dependencies = [
     "pandas>=1.3.0",
     "scipy>=1.7.0",
     "SimpleITK>=2.0.0",
+    "pyable @ git+https://github.com/erosmontin/pyable.git@v3",
 ]
 
 [project.optional-dependencies]
