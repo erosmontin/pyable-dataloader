@@ -94,6 +94,10 @@ class PyableDataset(Dataset):
         return_meta: If True, include metadata dict in output
         
         orientation: Standard orientation code (default 'LPS')
+        
+        debug_save_dir: Optional directory to save processed images for debugging
+        
+        debug_save_format: Format for debug saves ('nifti' or 'numpy', default 'nifti')
     
     Returns:
         Dictionary containing:
@@ -120,7 +124,9 @@ class PyableDataset(Dataset):
         force_reload: bool = False,
         dtype: torch.dtype = torch.float32,
         return_meta: bool = True,
-        orientation: str = 'LPS'
+        orientation: str = 'LPS',
+        debug_save_dir: Optional[str] = None,
+        debug_save_format: str = 'nifti'
     ):
         self.target_size = target_size
         
@@ -142,6 +148,8 @@ class PyableDataset(Dataset):
         self.dtype = dtype
         self.return_meta = return_meta
         self.orientation = orientation
+        self.debug_save_dir = debug_save_dir
+        self.debug_save_format = debug_save_format
         
         # Load manifest
         self.data = self._load_manifest(manifest)
@@ -358,6 +366,59 @@ class PyableDataset(Dataset):
         except Exception as e:
             warnings.warn(f"Failed to save cache {cache_path}: {e}")
     
+    def _save_debug_images(self, subject_id: str, image_arrays: List[np.ndarray], 
+                          roi_arrays: List[np.ndarray], labelmap_arrays: List[np.ndarray], 
+                          meta: dict):
+        """Save processed images for debugging."""
+        if self.debug_save_dir is None:
+            return
+        
+        debug_dir = Path(self.debug_save_dir)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save images
+        for i, img_array in enumerate(image_arrays):
+            if self.debug_save_format == 'nifti':
+                # Convert numpy array back to SimpleITK image
+                sitk_img = sitk.GetImageFromArray(img_array.astype(np.float32))
+                sitk_img.SetSpacing(meta['spacing'])
+                sitk_img.SetOrigin(meta['origin'])
+                sitk_img.SetDirection(meta['direction'])
+                
+                filename = debug_dir / f"{subject_id}_image_{i}.nii.gz"
+                sitk.WriteImage(sitk_img, str(filename))
+            elif self.debug_save_format == 'numpy':
+                filename = debug_dir / f"{subject_id}_image_{i}.npy"
+                np.save(filename, img_array)
+        
+        # Save ROIs
+        for i, roi_array in enumerate(roi_arrays):
+            if self.debug_save_format == 'nifti':
+                sitk_roi = sitk.GetImageFromArray(roi_array.astype(np.uint8))
+                sitk_roi.SetSpacing(meta['spacing'])
+                sitk_roi.SetOrigin(meta['origin'])
+                sitk_roi.SetDirection(meta['direction'])
+                
+                filename = debug_dir / f"{subject_id}_roi_{i}.nii.gz"
+                sitk.WriteImage(sitk_roi, str(filename))
+            elif self.debug_save_format == 'numpy':
+                filename = debug_dir / f"{subject_id}_roi_{i}.npy"
+                np.save(filename, roi_array)
+        
+        # Save labelmaps
+        for i, lm_array in enumerate(labelmap_arrays):
+            if self.debug_save_format == 'nifti':
+                sitk_lm = sitk.GetImageFromArray(lm_array.astype(np.uint8))
+                sitk_lm.SetSpacing(meta['spacing'])
+                sitk_lm.SetOrigin(meta['origin'])
+                sitk_lm.SetDirection(meta['direction'])
+                
+                filename = debug_dir / f"{subject_id}_labelmap_{i}.nii.gz"
+                sitk.WriteImage(sitk_lm, str(filename))
+            elif self.debug_save_format == 'numpy':
+                filename = debug_dir / f"{subject_id}_labelmap_{i}.npy"
+                np.save(filename, lm_array)
+    
     def _select_reference(self, images: List[SITKImaginable], item: dict) -> SITKImaginable:
         """Select reference image for subject."""
         # Check if reference specified in manifest
@@ -573,6 +634,9 @@ class PyableDataset(Dataset):
             images_array = image_arrays[0]
         else:
             images_array = np.zeros(self.target_size)
+        
+        # Save debug images if requested
+        self._save_debug_images(subject_id, image_arrays, roi_arrays, labelmap_arrays, meta)
         
         # Save to cache
         self._save_to_cache(cache_path, images_array, roi_arrays, labelmap_arrays, meta)
