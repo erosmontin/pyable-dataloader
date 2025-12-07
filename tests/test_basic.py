@@ -371,6 +371,100 @@ def test_get_multiple_augmentations(temp_dataset):
     np.testing.assert_array_equal(results[1]['images'], results2[1]['images'])
 
 
+def test_compute_roi_center_prefers_pyable_method(temp_dataset):
+    """Compute ROI center should prefer pyable centroid helpers when available."""
+    manifest_path, tmpdir = temp_dataset
+    dataset = PyableDataset(manifest=str(manifest_path), target_size=[16, 16, 16], return_meta=True)
+
+    # Create a fake ROI object that exposes pyable centroid helper
+    class FakeRoi:
+        def __init__(self, arr, coords):
+            self._arr = arr
+            self._coords = coords
+
+        def getImageAsNumpy(self):
+            return self._arr
+
+        def getCenterOfGravityCoordinates(self):
+            # Return a distinctive coordinate tuple
+            return self._coords
+        
+        def getPhysicalPointFromArrayIndex(self, index_tuple):
+            # Simple mapping: convert integer array index to float coordinates by
+            # returning the indices as-is; this avoids test failures if the
+            # fallback branch calls this method.
+            return tuple(float(i) for i in index_tuple)
+
+    # Use a small mask just for shape
+    arr = np.zeros((8, 8, 8), dtype=np.uint8)
+    arr[4, 4, 4] = 1
+    coords = (1.0, 2.0, 3.0)
+    fake_roi = FakeRoi(arr, coords)
+
+    computed = dataset._compute_roi_center(fake_roi)
+    assert computed == coords
+
+
+def test_compute_roi_center_scipy_fallback(temp_dataset, monkeypatch):
+    """If pyable centroids are not available, SciPy center_of_mass should be used.
+    We'll mock SciPy's center_of_mass to ensure that path is followed."""
+    import scipy.ndimage as nd
+    manifest_path, tmpdir = temp_dataset
+    dataset = PyableDataset(manifest=str(manifest_path), target_size=[16, 16, 16], return_meta=True)
+
+    # Create ROI-like object without pyable centroid
+    class FakeRoiNoPyable:
+        def __init__(self, arr):
+            self._arr = arr
+
+        def getImageAsNumpy(self):
+            return self._arr
+
+        def getPhysicalPointFromArrayIndex(self, idx):
+            # Convert from (k, j, i) to (x, y, z) using trivial mapping for test
+            return (float(idx[2]), float(idx[1]), float(idx[0]))
+
+    # Build a mask with a single voxel at (3,2,1)
+    arr = np.zeros((8, 8, 8), dtype=np.uint8)
+    arr[3, 2, 1] = 1
+    fake_roi = FakeRoiNoPyable(arr)
+
+    # Replace scipy.ndimage.center_of_mass to verify it is invoked and returns the array location
+    def fake_center_of_mass(mask):
+        # Return indices in (z, y, x) order
+        return (3.0, 2.0, 1.0)
+
+    monkeypatch.setattr(nd, 'center_of_mass', fake_center_of_mass)
+
+    computed = dataset._compute_roi_center(fake_roi)
+    assert computed == (1.0, 2.0, 3.0)
+
+
+def test_return_numpy_and_label_dtype(temp_dataset):
+    manifest_path, tmpdir = temp_dataset
+    dataset = PyableDataset(
+        manifest=str(manifest_path),
+        target_size=[16, 16, 16],
+        return_meta=True,
+        return_numpy=True
+    )
+
+    sample = dataset[0]
+    assert isinstance(sample['images'], np.ndarray)
+    assert isinstance(sample['rois'], list)
+    assert isinstance(sample['rois'][0], np.ndarray)
+
+    # Now test label dtype as int
+    dataset2 = PyableDataset(
+        manifest=str(manifest_path),
+        target_size=[16, 16, 16],
+        return_meta=True,
+    )
+    sample2 = dataset2[0]
+    assert 'label' in sample2
+    assert sample2['label'].dtype == torch.int64
+
+
 def test_multiple_augmentation_dataset(temp_dataset):
     """Test MultipleAugmentationDataset for batching."""
     manifest_path, tmpdir = temp_dataset

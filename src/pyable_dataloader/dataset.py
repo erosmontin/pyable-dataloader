@@ -15,6 +15,7 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Union, List, Dict, Callable, Optional, Tuple, Any
+import random
 import warnings
 import tempfile
 
@@ -124,6 +125,7 @@ class PyableDataset(Dataset):
         cache_dir: Optional[str] = None,
         force_reload: bool = False,
         dtype: torch.dtype = torch.float32,
+        label_dtype: Optional[torch.dtype] = None,
         return_meta: bool = True,
         orientation: str = 'LPS',
         debug_save_dir: Optional[str] = None,
@@ -154,6 +156,8 @@ class PyableDataset(Dataset):
         self.debug_save_format = debug_save_format
         # If True, convenience getters will return numpy arrays instead of torch tensors
         self.return_numpy = return_numpy
+        # Label dtype defaults to long (for classification targets). If None, infer later.
+        self.label_dtype = label_dtype if label_dtype is not None else torch.int64
         
         # Load manifest
         self.data = self._load_manifest(manifest)
@@ -222,7 +226,11 @@ class PyableDataset(Dataset):
                     try:
                         paths = json.loads(row['image_paths'])
                         data[subj_id]['images'].extend(paths)
-                    except:
+                    except (json.JSONDecodeError, TypeError, ValueError) as e:
+                        warnings.warn(
+                            f"CSV manifest: subject {subj_id}: failed to decode 'image_paths' as JSON; "
+                            f"treating value as single path: {e}"
+                        )
                         data[subj_id]['images'].append(str(row['image_paths']))
                 
                 # Parse ROI paths
@@ -230,7 +238,11 @@ class PyableDataset(Dataset):
                     try:
                         paths = json.loads(row['roi_paths'])
                         data[subj_id]['rois'].extend(paths)
-                    except:
+                    except (json.JSONDecodeError, TypeError, ValueError) as e:
+                        warnings.warn(
+                            f"CSV manifest: subject {subj_id}: failed to decode 'roi_paths' as JSON; "
+                            f"treating value as single path: {e}"
+                        )
                         data[subj_id]['rois'].append(str(row['roi_paths']))
                 
                 # Parse labelmap paths
@@ -238,7 +250,11 @@ class PyableDataset(Dataset):
                     try:
                         paths = json.loads(row['labelmap_paths'])
                         data[subj_id]['labelmaps'].extend(paths)
-                    except:
+                    except (json.JSONDecodeError, TypeError, ValueError) as e:
+                        warnings.warn(
+                            f"CSV manifest: subject {subj_id}: failed to decode 'labelmap_paths' as JSON; "
+                            f"treating value as single path: {e}"
+                        )
                         data[subj_id]['labelmaps'].append(str(row['labelmap_paths']))
                 
                 # Reference
@@ -334,12 +350,15 @@ class PyableDataset(Dataset):
         
         try:
             cached = np.load(cache_path, allow_pickle=True)
+            # Explicitly collect ROI and labelmap keys to avoid fragile index logic
+            roi_keys = sorted([k for k in cached.files if k.startswith('roi_')])
+            labelmap_keys = sorted([k for k in cached.files if k.startswith('labelmap_')])
+            rois = [cached[k] for k in roi_keys]
+            labelmaps = [cached[k] for k in labelmap_keys]
             return {
                 'images': cached['images'],
-                'rois': [cached[f'roi_{i}'] for i in range(len(cached.files) - 2) 
-                         if f'roi_{i}' in cached.files],
-                'labelmaps': [cached[f'labelmap_{i}'] for i in range(len(cached.files) - 2)
-                              if f'labelmap_{i}' in cached.files],
+                'rois': rois,
+                'labelmaps': labelmaps,
                 'meta': cached['meta'].item()
             }
         except Exception as e:
@@ -366,8 +385,20 @@ class PyableDataset(Dataset):
             save_dict[f'labelmap_{i}'] = lm
         
         try:
-            np.savez_compressed(cache_path, **save_dict)
+            # Write to temp file and atomically replace to avoid partial writes
+            tmp_path = cache_path.with_suffix('.tmp')
+            np.savez_compressed(tmp_path, **save_dict)
+            if tmp_path.exists():
+                os.replace(tmp_path, cache_path)
+            else:
+                raise IOError(f"Temp cache file not created: {tmp_path}")
         except Exception as e:
+            # Try to remove the partially written tmp file if present
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
             warnings.warn(f"Failed to save cache {cache_path}: {e}")
     
     def _save_debug_images(self, subject_id: str, image_arrays: List[np.ndarray], 
@@ -649,16 +680,28 @@ class PyableDataset(Dataset):
         """
         results = []
         for idx, config in enumerate(augmentation_configs):
-            # Set seed for reproducibility
-            np.random.seed(base_seed + idx)
-            
-            # Get augmented sample
-            sample = self.get_numpy_item(
-                subject_idx,
-                transforms=config.get('transforms'),
-                as_nifti=as_nifti,
-                save_to_files=save_to_files
-            )
+            # Save RNG state and set reproducible seeds for numpy, torch and random
+            old_np_state = np.random.get_state()
+            old_random_state = random.getstate()
+            old_torch_state = torch.get_rng_state()
+            try:
+                seed = int(base_seed) + int(idx)
+                np.random.seed(seed)
+                random.seed(seed)
+                torch.manual_seed(seed)
+
+                # Get augmented sample
+                sample = self.get_numpy_item(
+                    subject_idx,
+                    transforms=config.get('transforms'),
+                    as_nifti=as_nifti,
+                    save_to_files=save_to_files
+                )
+            finally:
+                # Restore RNG state to avoid side effects
+                np.random.set_state(old_np_state)
+                random.setstate(old_random_state)
+                torch.set_rng_state(old_torch_state)
             
             # Format result
             result = {
@@ -699,25 +742,43 @@ class PyableDataset(Dataset):
     
     def _compute_roi_center(self, roi: Union[Roiable, LabelMapable]) -> Optional[Tuple[float, float, float]]:
         """Compute physical center of ROI."""
+        # 1) Try to use pyable-provided centroid helpers if present
+        try:
+            if hasattr(roi, "getCenterOfGravityCoordinates"):
+                coords = roi.getCenterOfGravityCoordinates()
+                if coords is not None:
+                    return coords
+            if hasattr(roi, "getCentroidCoordinates"):
+                coords = roi.getCentroidCoordinates()
+                if coords is not None:
+                    return coords
+        except Exception:
+            # Silently fall back to the classic approach below if pyable helper fails
+            pass
+
+        # 2) Fallback to numpy/scipy-based centroid computation of the label mask
         roi_array = roi.getImageAsNumpy()  # Returns (Z,Y,X) in v3
-        
+
         # Filter to specific labels if requested
         if self.roi_labels is not None:
             mask = np.isin(roi_array, self.roi_labels)
         else:
             mask = roi_array > 0
-        
+
         if not np.any(mask):
             return None
-        
-        # Compute center of mass in array indices (Z,Y,X)
-        from scipy import ndimage
-        com_zyx = ndimage.center_of_mass(mask)
-        
-        # Convert to physical coordinates (need to reverse to X,Y,Z for ITK)
-        com_kji = (int(com_zyx[0]), int(com_zyx[1]), int(com_zyx[2]))
+
+        # Prefer SciPy center_of_mass if available (more robust), else fallback to a numpy implementation
+        try:
+            from scipy import ndimage
+            com_zyx = ndimage.center_of_mass(mask)
+        except Exception:
+            coords = np.argwhere(mask)
+            com_zyx = tuple(coords.mean(axis=0).tolist())
+
+        # Convert to nearest integer array index and convert to physical coordinate
+        com_kji = (int(np.round(com_zyx[0])), int(np.round(com_zyx[1])), int(np.round(com_zyx[2])))
         physical_xyz = roi.getPhysicalPointFromArrayIndex(com_kji)
-        
         return physical_xyz
     
     def _create_centered_reference(
@@ -878,6 +939,12 @@ class PyableDataset(Dataset):
         if self.mask_with_roi and roi_arrays:
             # Combine all ROI masks
             combined_mask = np.any([arr > 0 for arr in roi_arrays], axis=0)
+            # Validate shapes
+            for i, arr in enumerate(image_arrays):
+                if combined_mask.shape != arr.shape:
+                    raise ValueError(
+                        f"ROI mask shape {combined_mask.shape} does not match image shape {arr.shape}"
+                    )
             # Apply to each image
             image_arrays = [arr * combined_mask for arr in image_arrays]
         
@@ -912,6 +979,35 @@ class PyableDataset(Dataset):
         labelmaps = data['labelmaps']
         meta = data['meta']
         
+        # If requested, return numpy arrays directly and skip torch conversion
+        if self.return_numpy:
+            result = {
+                'id': subject_id,
+                'images': images,
+                'rois': rois,
+                'labelmaps': labelmaps
+            }
+            if 'label' in meta:
+                if self.label_dtype in (torch.int64, torch.int32, torch.int16, torch.int8):
+                    # Convert to a plain int for numpy output
+                    try:
+                        result['label'] = int(meta['label'])
+                    except Exception:
+                        result['label'] = meta['label']
+                else:
+                    result['label'] = meta['label']
+            elif 'label' in item:
+                if self.label_dtype in (torch.int64, torch.int32, torch.int16, torch.int8):
+                    try:
+                        result['label'] = int(item['label'])
+                    except Exception:
+                        result['label'] = item['label']
+                else:
+                    result['label'] = item['label']
+            if self.return_meta:
+                result['meta'] = meta
+            return result
+
         # Convert to PyTorch tensors
         images_tensor = torch.from_numpy(images).to(self.dtype)
         
@@ -919,8 +1015,9 @@ class PyableDataset(Dataset):
         if images_tensor.ndim == 3:
             images_tensor = images_tensor.unsqueeze(0)  # Add channel dim
         
-        roi_tensors = [torch.from_numpy(roi).to(self.dtype) for roi in rois]
-        labelmap_tensors = [torch.from_numpy(lm).to(self.dtype) for lm in labelmaps]
+        # Convert ROIs/labelmaps to integer dtype by default
+        roi_tensors = [torch.from_numpy(roi).to(torch.int64) for roi in rois]
+        labelmap_tensors = [torch.from_numpy(lm).to(torch.int64) for lm in labelmaps]
         
         result = {
             'id': subject_id,
@@ -931,9 +1028,27 @@ class PyableDataset(Dataset):
         
         # Add label if present
         if 'label' in meta:
-            result['label'] = torch.tensor(meta['label'], dtype=self.dtype)
+            # If label_dtype is an integer dtype, coerce to int
+            # Always cast to label_dtype when label_dtype is provided
+            if self.label_dtype is not None:
+                try:
+                    # Convert floats to integers if label_dtype is integer type
+                    val = meta['label']
+                    if isinstance(val, (float, np.floating)) and self.label_dtype in (torch.int64, torch.int32, torch.int16, torch.int8):
+                        val = int(val)
+                    result['label'] = torch.tensor(val, dtype=self.label_dtype)
+                except Exception:
+                    # fallback
+                    result['label'] = torch.tensor(meta['label'], dtype=self.dtype)
         elif 'label' in item:
-            result['label'] = torch.tensor(item['label'], dtype=self.dtype)
+            if self.label_dtype is not None:
+                try:
+                    val = item['label']
+                    if isinstance(val, (float, np.floating)) and self.label_dtype in (torch.int64, torch.int32, torch.int16, torch.int8):
+                        val = int(val)
+                    result['label'] = torch.tensor(val, dtype=self.label_dtype)
+                except Exception:
+                    result['label'] = torch.tensor(item['label'], dtype=self.dtype)
         
         if self.return_meta:
             result['meta'] = meta
@@ -994,6 +1109,71 @@ class PyableDataset(Dataset):
             return resampler.Execute(resampled_sitk)
         
         return overlayer
+
+
+class MultipleAugmentationDataset(Dataset):
+    """Dataset that generates multiple augmentations per sample using a base PyableDataset.
+
+    It uses PyableDataset.get_multiple_augmentations to precompute augmented samples and
+    supplies them as Dataset elements that are compatible with PyTorch DataLoader.
+    """
+
+    def __init__(self, base_dataset: PyableDataset, augmentation_configs: List[Dict[str, Any]], base_seed: int = 42):
+        self.base_dataset = base_dataset
+        self.augmentation_configs = augmentation_configs
+        self.base_seed = base_seed
+        self.augmented_data = []
+
+        # Pre-generate all augmentations
+        for subj_idx in range(len(base_dataset)):
+            augmented_samples = base_dataset.get_multiple_augmentations(
+                subject_idx=subj_idx,
+                augmentation_configs=augmentation_configs,
+                base_seed=base_seed
+            )
+            self.augmented_data.extend(augmented_samples)
+
+    def __len__(self):
+        return len(self.augmented_data)
+
+    def __getitem__(self, idx: int):
+        item = self.augmented_data[idx]
+
+        # Convert to tensors by reusing PyableDataset._format_output behavior
+        # We'll construct a lightweight dict and pass through _format_output to keep semantics.
+        # Build pseudo item and sample dict
+        images = item['images']
+        rois = item['rois']
+        labelmaps = item['labelmaps']
+        meta = item['meta']
+        # If images are numpy arrays, convert to PyTorch tensors
+        if isinstance(images, np.ndarray):
+            images_tensor = torch.from_numpy(images).to(self.base_dataset.dtype)
+            if images_tensor.ndim == 3:
+                images_tensor = images_tensor.unsqueeze(0)
+        else:
+            images_tensor = images
+
+        roi_tensors = [torch.from_numpy(r).to(torch.int64) for r in rois]
+        labelmap_tensors = [torch.from_numpy(lm).to(torch.int64) for lm in labelmaps]
+
+        result = {
+            'id': meta.get('subject_id', f'aug_{idx}'),
+            'images': images_tensor,
+            'rois': roi_tensors,
+            'labelmaps': labelmap_tensors,
+            'meta': meta,
+            'augmentation_name': item.get('name'),
+            'config': item.get('config')
+        }
+
+        if 'label' in meta:
+            if isinstance(meta['label'], (int, np.integer)):
+                result['label'] = torch.tensor(meta['label'], dtype=self.base_dataset.label_dtype)
+            else:
+                result['label'] = torch.tensor(meta['label'], dtype=self.base_dataset.dtype)
+
+        return result
 
 
 class MultipleAugmentationDataset(Dataset):

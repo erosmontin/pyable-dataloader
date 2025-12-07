@@ -655,6 +655,15 @@ dataset = PyableDataset(
     mask_with_roi=True,            # Mask images with ROI
     roi_labels=[1, 2, 3]           # Only use these label values
 )
+
+#### How ROI center is computed (pyable preference)
+
+PyableDataset will compute the ROI center for ROI-centered processing in the following order:
+1. If the `Roiable`/`LabelMapable` object provides a pyable helper such as `getCenterOfGravityCoordinates()` or `getCentroidCoordinates()`, that method is used (preferred).
+2. If the pyable helper is not available, SciPy's `ndimage.center_of_mass()` is used to compute the centroid of the ROI.
+3. As a last fallback, the dataset uses a simple NumPy-based mean of coordinates where the ROI mask is set.
+
+This behavior ensures the most accurate and efficient method available is used. SciPy is a direct dependency in the project, but if absent the pyable centroid helpers or NumPy fallback will be used.
 ```
 
 ### Multi-Modal Stacking
@@ -836,6 +845,9 @@ PyableDataset(
 - `dtype`: PyTorch dtype for output tensors
 - `return_meta`: Include metadata in output
 - `orientation`: Standard orientation code
+ - `label_dtype`: (Optional) default `torch.int64` for classification tasks. If int labels are present they will be returned as this dtype.
+ - `return_numpy`: (Optional) If True, `__getitem__` returns numpy arrays instead of torch tensors. Use `get_numpy_item()` when you need numpy versions temporarily.
+ - `scipy` dependency: SciPy is required for certain transforms (e.g., affine, bspline) and for `center_of_mass` computations. SciPy is already listed in `pyproject.toml` dependencies; if not installed in your environment, pyable's centroid methods will be used when available, or a NumPy fallback will be employed.
 
 **Returns:**
 Dictionary with:

@@ -230,29 +230,82 @@ class RandomAffine(MedicalImageTransform):
     def __init__(
         self,
         rotation_range: Optional[Union[float, List[Tuple[float, float]]]] = 5.0,
-        zoom_range: Tuple[float, float] = (0.95, 1.05),
-        shift_range: Optional[Union[float, List[Tuple[float, float]]]] = 2.0,
-        prob: float = 0.5
+        scale_range: Optional[Union[float, List[Tuple[float, float]]]] = 0.0,
+        zoom_range: Optional[Union[float, List[Tuple[float, float]]]] = None,
+        shear_range: Optional[Union[float, List[Tuple[float, float]]]] = 0.0,
+        translation_range: Optional[Union[float, List[Tuple[float, float]]]] = 2.0,
+        shift_range: Optional[Union[float, List[Tuple[float, float]]]] = None,
+        prob: float = 0.5,
+        center: Optional[Union[str, Tuple[float, float, float]]] = 'image',
+        random_state: Optional[int] = None
     ):
         self.rotation_range = rotation_range
-        self.zoom_range = zoom_range
-        self.shift_range = shift_range
+        self.scale_range = scale_range
+        # legacy/alternative parameter name for zoom
+        if zoom_range is not None:
+            self.zoom_range = zoom_range
+            self.scale_range = zoom_range
+        else:
+            self.zoom_range = self.scale_range
+        self.shear_range = shear_range
+        self.translation_range = translation_range
+        # legacy/alternative name for translation / shift
+        if shift_range is not None:
+            self.shift_range = shift_range
+            self.translation_range = shift_range
+        else:
+            self.shift_range = self.translation_range
+        self.center = center
         self.prob = prob
+        self.random_state = random_state
     
     def __call__(self, images, rois, labelmaps, meta):
         if np.random.rand() > self.prob:
             return images, rois, labelmaps
         
+        # RNG for reproducibility
+        rng = np.random.RandomState(self.random_state) if self.random_state is not None else np.random
+        # Default zoom (will be replaced if zoom/scale ranges are provided)
+        zoom = 1.0
+
         # Generate random parameters
         if isinstance(self.rotation_range, (list, tuple)):
-            rotation = [np.random.uniform(low, high) for (low, high) in self.rotation_range]
+            rotation = [rng.uniform(low, high) for (low, high) in self.rotation_range]
         else:
-            rotation = [0.0, 0.0, float(np.random.uniform(-self.rotation_range, self.rotation_range))]
-        zoom = np.random.uniform(*self.zoom_range)
-        if isinstance(self.shift_range, (list, tuple)):
-            shift = [np.random.uniform(low, high) for (low, high) in self.shift_range]
+            rotation = [0.0, 0.0, float(rng.uniform(-self.rotation_range, self.rotation_range))]
+
+        # Scale (per-axis or uniform)
+        if isinstance(self.scale_range, (list, tuple)):
+            # Allow either per-axis ranges [(min,max), ...] or a global (min, max) tuple
+            first = self.scale_range[0]
+            if isinstance(first, (list, tuple)):
+                # Per-axis ranges provided
+                scale = [rng.uniform(low, high) for (low, high) in self.scale_range]
+            else:
+                # Global min/max tuple provided -> uniform per-axis sampling
+                if len(self.scale_range) == 2 and all(isinstance(v, (int, float)) for v in self.scale_range):
+                    low, high = self.scale_range
+                    scale = [rng.uniform(low, high) for _ in range(3)]
+                else:
+                    # If a scalar was provided, treat as symmetric +/- around 1.0
+                    scale = [rng.uniform(1.0 - self.scale_range, 1.0 + self.scale_range) for _ in range(3)]
         else:
-            shift = [float(np.random.uniform(-self.shift_range, self.shift_range)) for _ in range(3)]
+            scale = [rng.uniform(1.0 - self.scale_range, 1.0 + self.scale_range) for _ in range(3)]
+
+        # Shear (in degrees per axis -> convert later)
+        if isinstance(self.shear_range, (list, tuple)):
+            if isinstance(self.shear_range[0], (list, tuple)):
+                shear = [rng.uniform(low, high) for (low, high) in self.shear_range]
+            else:
+                shear = [rng.uniform(-self.shear_range, self.shear_range) for _ in range(3)]
+        else:
+            shear = [rng.uniform(-self.shear_range, self.shear_range) for _ in range(3)]
+
+        # Translation in mm per axis
+        if isinstance(self.translation_range, (list, tuple)):
+            translation = [rng.uniform(low, high) for (low, high) in self.translation_range]
+        else:
+            translation = [float(rng.uniform(-self.translation_range, self.translation_range)) for _ in range(3)]
         
         # Build transformation matrix
         # For 3D: rotate in axial plane (Y-X)
@@ -279,12 +332,18 @@ class RandomAffine(MedicalImageTransform):
         Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
         rotation_matrix = Rz @ Ry @ Rx
         
-        # Apply zoom
-        zoom_matrix = np.diag([zoom, zoom, zoom])
-        affine_matrix = rotation_matrix @ zoom_matrix
+        # Apply scale and shear
+        scale_matrix = np.diag(scale)
+        shear_x, shear_y, shear_z = [np.tan(np.deg2rad(s)) for s in shear]
+        shear_matrix = np.array([[1, shear_x, shear_y], [shear_x, 1, shear_z], [shear_y, shear_z, 1]])
+        affine_matrix = rotation_matrix @ scale_matrix @ shear_matrix
         
-        # Compute offset to keep center fixed
-        offset = center - affine_matrix @ center + shift
+        # Compute offset to keep center fixed (shift in voxels)
+        if meta and 'spacing' in meta:
+            shift_voxels = np.array([translation[i] / meta['spacing'][i] for i in range(3)])
+        else:
+            shift_voxels = np.array(translation)
+        offset = center - affine_matrix @ center + shift_voxels
         
         # If pyable is available, prefer using SITK transforms for label-preserving
         # behavior via Imaginable.applyTransform. Otherwise fall back to ndimage.
@@ -313,7 +372,7 @@ class RandomAffine(MedicalImageTransform):
                 for img in images:
                     img_copy = SITKImaginable()
                     img_copy.setImageFromNumpy(img, refimage=ref.getImage() if ref else None)
-                    img_copy.rotateImage(rotation, translation=shift, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
+                    img_copy.rotateImage(rotation, translation=translation, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
                     transformed_images.append(img_copy.getImageAsNumpy())
                 images = transformed_images
             else:
@@ -323,12 +382,12 @@ class RandomAffine(MedicalImageTransform):
                     for c in range(images.shape[0]):
                         img = SITKImaginable()
                         img.setImageFromNumpy(images[c], refimage=ref.getImage() if ref else None)
-                        img.rotateImage(rotation, translation=shift, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
+                        img.rotateImage(rotation, translation=translation, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
                         transformed_images.append(img.getImageAsNumpy())
                 else:
                     img = SITKImaginable()
                     img.setImageFromNumpy(images, refimage=ref.getImage() if ref else None)
-                    img.rotateImage(rotation, translation=shift, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
+                    img.rotateImage(rotation, translation=translation, interpolator=sitk.sitkLinear, reference_image=ref.getImage() if ref else None)
                     transformed_images = [img.getImageAsNumpy()]
 
                 # Stack channels if needed
@@ -342,14 +401,14 @@ class RandomAffine(MedicalImageTransform):
             for roi in rois:
                 l = LabelMapable()
                 l.setImageFromNumpy(roi, refimage=ref.getImage() if ref else None)
-                l.rotateImage(rotation, translation=shift, interpolator=sitk.sitkNearestNeighbor, reference_image=ref.getImage() if ref else None)
+                l.rotateImage(rotation, translation=translation, interpolator=sitk.sitkNearestNeighbor, reference_image=ref.getImage() if ref else None)
                 transformed_rois.append(l.getImageAsNumpy())
 
             transformed_labelmaps = []
             for lm in labelmaps:
                 l = LabelMapable()
                 l.setImageFromNumpy(lm, refimage=ref.getImage() if ref else None)
-                l.rotateImage(rotation, translation=shift, interpolator=sitk.sitkNearestNeighbor, reference_image=ref.getImage() if ref else None)
+                l.rotateImage(rotation, translation=translation, interpolator=sitk.sitkNearestNeighbor, reference_image=ref.getImage() if ref else None)
                 transformed_labelmaps.append(l.getImageAsNumpy())
 
             rois = transformed_rois
@@ -362,18 +421,26 @@ class RandomAffine(MedicalImageTransform):
             angle = float(np.random.uniform(-self.rotation_range[2][0], self.rotation_range[2][1]))
         else:
             angle = float(np.random.uniform(-self.rotation_range, self.rotation_range))
-        zoom = np.random.uniform(*self.zoom_range)
+        # Use the previously sampled per-axis scale to define zoom
+        try:
+            zoom = float(np.mean(scale))
+        except Exception:
+            # Fallback, if scale is not defined for some reason
+            if isinstance(self.zoom_range, (list, tuple)) and len(self.zoom_range) == 2:
+                zoom = float(np.random.uniform(self.zoom_range[0], self.zoom_range[1]))
+            else:
+                zoom = float(np.random.uniform(1.0 - float(self.zoom_range), 1.0 + float(self.zoom_range)))
         if isinstance(self.shift_range, (list, tuple)):
             # Convert mm to voxels if meta available
             if meta and 'spacing' in meta:
-                shift = np.array([np.random.uniform(low, high) / s for (low, high), s in zip(self.shift_range, meta['spacing'])])
+                translation = np.array([np.random.uniform(low, high) / s for (low, high), s in zip(self.shift_range, meta['spacing'])])
             else:
-                shift = np.array([np.random.uniform(low, high) for (low, high) in self.shift_range])
+                translation = np.array([np.random.uniform(low, high) for (low, high) in self.shift_range])
         else:
             if meta and 'spacing' in meta:
-                shift = float(np.random.uniform(-self.shift_range, self.shift_range)) / np.array(meta['spacing'])
+                translation = float(np.random.uniform(-self.shift_range, self.shift_range)) / np.array(meta['spacing'])
             else:
-                shift = np.random.uniform(-self.shift_range, self.shift_range, size=3)
+                translation = np.random.uniform(-self.shift_range, self.shift_range, size=3)
         if has_channels:
             transformed_images = []
             for c in range(images.shape[0]):
@@ -434,12 +501,14 @@ class RandomTranslation(MedicalImageTransform):
         prob: probability to apply
     """
 
-    def __init__(self, translation_range: Optional[List[Tuple[float, float]]] = None, prob: float = 0.5):
+    def __init__(self, translation_range: Optional[List[Tuple[float, float]]] = None, prob: float = 0.5, center: Optional[Union[str, Tuple[float, float, float]]] = 'image', random_state: Optional[int] = None):
         # Default ±5 mm per axis
         if translation_range is None:
             translation_range = [[-5, 5], [-5, 5], [-5, 5]]
         self.translation_range = translation_range
         self.prob = prob
+        self.center = center
+        self.random_state = random_state
 
     def __call__(self, images, rois, labelmaps, meta):
         if np.random.rand() > self.prob:
@@ -449,8 +518,11 @@ class RandomTranslation(MedicalImageTransform):
             # Can't apply label-preserving transform, skip
             return images, rois, labelmaps
 
+        # Random generator for reproducibility
+        rng = np.random.RandomState(self.random_state) if self.random_state is not None else np.random
+
         # Sample per-axis translations in mm
-        t = [np.random.uniform(low, high) for (low, high) in self.translation_range]
+        t = [rng.uniform(low, high) for (low, high) in self.translation_range]
 
         # Check if images is list of pyable objects or numpy arrays
         if isinstance(images, list) and images and hasattr(images[0], 'getImage'):
@@ -536,11 +608,13 @@ class RandomRotation(MedicalImageTransform):
     Random rotation using Imaginable, with per-axis ranges in degrees.
     """
 
-    def __init__(self, rotation_range: Optional[List[Tuple[float, float]]] = None, prob: float = 0.5):
+    def __init__(self, rotation_range: Optional[List[Tuple[float, float]]] = None, prob: float = 0.5, center: Optional[Union[str, Tuple[float, float, float]]] = 'image', random_state: Optional[int] = None):
         if rotation_range is None:
             rotation_range = [[-5, 5], [-5, 5], [-5, 5]]
         self.rotation_range = rotation_range
         self.prob = prob
+        self.center = center
+        self.random_state = random_state
 
     def __call__(self, images, rois, labelmaps, meta):
         if np.random.rand() > self.prob:
@@ -558,11 +632,11 @@ class RandomRotation(MedicalImageTransform):
             imgref.SetDirection(meta['direction'])
             ref = SITKImaginable(image=imgref)
 
-        # Sample rotations per axis
-        rotation = [np.random.uniform(low, high) for (low, high) in self.rotation_range]
+        # RNG for reproducibility
+        rng = np.random.RandomState(self.random_state) if self.random_state is not None else np.random
 
         # Sample rotations per axis
-        rotation = [np.random.uniform(low, high) for (low, high) in self.rotation_range]
+        rotation = [rng.uniform(low, high) for (low, high) in self.rotation_range]
 
         if isinstance(images, list):
             # List of arrays (each Z × Y × X)
