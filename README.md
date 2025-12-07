@@ -757,6 +757,45 @@ for sample in augmented_samples:
 
 This enables assessment of feature stability across different augmentation strategies, crucial for robust radiomics analysis.
 
+### Multiple Augmentations for PyTorch Training
+
+For training PyTorch models with multiple augmentations per sample, use the `MultipleAugmentationDataset` wrapper:
+
+```python
+from torch.utils.data import DataLoader
+from pyable_dataloader import PyableDataset, MultipleAugmentationDataset, Compose, RandomRotation
+
+# Create base dataset
+base_dataset = PyableDataset(
+    manifest='data/manifest.json',
+    target_size=[64, 64, 64],
+    target_spacing=1.0
+)
+
+# Define augmentations
+augmentation_configs = [
+    {'name': 'original', 'transforms': None},
+    {'name': 'rotated', 'transforms': Compose([RandomRotation([[-10,10]]*3, prob=1.0)])}
+]
+
+# Create augmented dataset (expands each subject into multiple samples)
+aug_dataset = MultipleAugmentationDataset(
+    base_dataset=base_dataset,
+    augmentation_configs=augmentation_configs,
+    cache_augmentations=True
+)
+
+# Use with DataLoader - automatic batching of augmented samples
+loader = DataLoader(aug_dataset, batch_size=8, shuffle=True)
+
+for batch in loader:
+    images = batch['images']        # Shape: [8, C, D, H, W]
+    aug_names = batch['augmentation_name']  # Which augmentation
+    # Train model with multiple views of same data
+```
+
+This enables robust training by exposing models to multiple augmented versions of the same underlying data.
+
 ## API Reference
 
 ### PyableDataset
@@ -1391,6 +1430,37 @@ for batch in loader:
     images = batch['images']  # [B, C, D, H, W]
     labels = batch['label']
     # Train your model
+```
+
+### MultipleAugmentationDataset
+
+```python
+MultipleAugmentationDataset(
+    base_dataset: PyableDataset,
+    augmentation_configs: List[Dict[str, Any]],
+    base_seed: int = 42,
+    cache_augmentations: bool = True
+)
+```
+
+PyTorch Dataset wrapper that generates multiple augmented versions of each sample for robust training.
+
+**Parameters:**
+- `base_dataset`: PyableDataset instance to wrap
+- `augmentation_configs`: List of augmentation configurations
+- `base_seed`: Base random seed for reproducibility
+- `cache_augmentations`: Pre-compute all augmentations (faster but more memory)
+
+**Sample Output:**
+```python
+{
+    'id': 'subject_001_rotated',
+    'images': torch.Tensor([C, D, H, W]),
+    'rois': [torch.Tensor([D, H, W]), ...],
+    'labelmaps': [torch.Tensor([D, H, W]), ...],
+    'meta': {...},
+    'augmentation_name': 'rotated'
+}
 ```
 
 ## Files You'll Need to Read/Modify

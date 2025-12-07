@@ -2,7 +2,7 @@
 PyTorch DataLoader for Medical Images using pyable
 """
 
-from .dataset import PyableDataset
+from .dataset import PyableDataset, MultipleAugmentationDataset
 from .transforms import (
     Compose,
     IntensityNormalization,
@@ -15,10 +15,11 @@ from .transforms import (
     RandomNoise,
 )
 
-__version__ = "0.1.0"
+__version__ = "3"
 
 __all__ = [
     "PyableDataset",
+    "MultipleAugmentationDataset",
     "Compose",
     "IntensityNormalization",
     "RandomFlip",

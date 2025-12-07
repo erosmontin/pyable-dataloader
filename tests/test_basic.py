@@ -12,7 +12,7 @@ import tempfile
 import json
 from pathlib import Path
 
-from pyable_dataloader import PyableDataset, IntensityNormalization, RandomFlip, Compose, RandomTranslation, RandomRotation
+from pyable_dataloader import PyableDataset, MultipleAugmentationDataset, IntensityNormalization, RandomFlip, Compose, RandomTranslation, RandomRotation
 
 
 def create_synthetic_image(size=(32, 32, 32), spacing=(1.0, 1.0, 1.0)):
@@ -371,5 +371,77 @@ def test_get_multiple_augmentations(temp_dataset):
     np.testing.assert_array_equal(results[1]['images'], results2[1]['images'])
 
 
+def test_multiple_augmentation_dataset(temp_dataset):
+    """Test MultipleAugmentationDataset for batching."""
+    manifest_path, tmpdir = temp_dataset
+    
+    # Create base dataset
+    base_dataset = PyableDataset(
+        manifest=str(manifest_path),
+        target_size=[16, 16, 16],
+        return_meta=True
+    )
+    
+    # Define augmentation configs
+    augmentation_configs = [
+        {
+            'name': 'original',
+            'transforms': None
+        },
+        {
+            'name': 'rotated',
+            'transforms': Compose([
+                IntensityNormalization(method='zscore'),
+                RandomRotation(rotation_range=[[-5, 5], [-5, 5], [-5, 5]], prob=1.0)
+            ])
+        }
+    ]
+    
+    # Create augmented dataset
+    aug_dataset = MultipleAugmentationDataset(
+        base_dataset=base_dataset,
+        augmentation_configs=augmentation_configs,
+        base_seed=42
+    )
+    
+    # Check length (3 subjects × 2 augmentations = 6 total samples)
+    assert len(aug_dataset) == 6
+    
+    # Check that we can access all samples
+    for i in range(len(aug_dataset)):
+        sample = aug_dataset[i]
+        assert 'id' in sample
+        assert 'images' in sample
+        assert 'rois' in sample
+        assert 'augmentation_name' in sample
+        # augmentation_config removed to avoid collate issues
+        
+        # Check ID format
+        assert '_' in sample['id']
+        parts = sample['id'].split('_')
+        assert len(parts) >= 2
+    
+    # Test with PyTorch DataLoader
+    from torch.utils.data import DataLoader
+
+    loader = DataLoader(aug_dataset, batch_size=2, shuffle=False)
+    batch = next(iter(loader))
+
+    # Debug: check individual samples
+    sample0 = aug_dataset[0]
+    sample1 = aug_dataset[1]
+    print("Sample 0 images shape:", sample0['images'].shape if hasattr(sample0['images'], 'shape') else type(sample0['images']))
+    print("Sample 1 images shape:", sample1['images'].shape if hasattr(sample1['images'], 'shape') else type(sample1['images']))
+    print("Sample 0 augmentation_name:", sample0['augmentation_name'])
+    print("Sample 1 augmentation_name:", sample1['augmentation_name'])
+
+    # Check batch structure
+    assert 'images' in batch
+    assert 'rois' in batch
+    assert 'augmentation_name' in batch
+    assert len(batch['augmentation_name']) == 2  # Batch size
+    # Images should be stacked: [batch_size, channels, depth, height, width]
+    assert batch['images'].shape[0] == 2  # batch_size
+    assert batch['images'].ndim == 5  # [B, C, D, H, W]
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

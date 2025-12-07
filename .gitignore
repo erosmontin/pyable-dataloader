@@ -9,3 +9,4 @@ newenv/
 build/
 testenv/
 dist/
+*.pth

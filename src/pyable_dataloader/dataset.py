@@ -994,3 +994,133 @@ class PyableDataset(Dataset):
             return resampler.Execute(resampled_sitk)
         
         return overlayer
+
+
+class MultipleAugmentationDataset(Dataset):
+    """
+    Dataset wrapper that generates multiple augmented versions of each sample.
+    
+    This allows using PyTorch DataLoader to batch multiple augmentations of the same
+    subject, enabling robust training and feature stability analysis.
+    
+    Args:
+        base_dataset: PyableDataset instance to wrap
+        augmentation_configs: List of augmentation configurations
+        base_seed: Base random seed for reproducibility
+        cache_augmentations: Whether to pre-compute all augmentations (faster but more memory)
+    
+    Example:
+        ```python
+        from pyable_dataloader import PyableDataset, MultipleAugmentationDataset, Compose, RandomRotation
+        
+        # Create base dataset
+        base_dataset = PyableDataset('manifest.json', target_size=[64, 64, 64])
+        
+        # Define augmentations
+        configs = [
+            {'name': 'original', 'transforms': None},
+            {'name': 'rotated', 'transforms': Compose([RandomRotation([[-5,5]]*3, prob=1.0)])}
+        ]
+        
+        # Create augmented dataset (10 subjects × 2 augmentations = 20 total samples)
+        aug_dataset = MultipleAugmentationDataset(base_dataset, configs)
+        
+        # Use with DataLoader
+        loader = DataLoader(aug_dataset, batch_size=4, shuffle=True)
+        for batch in loader:
+            # batch contains 4 augmented samples from different subjects/augmentations
+            pass
+        ```
+    """
+    
+    def __init__(
+        self,
+        base_dataset: PyableDataset,
+        augmentation_configs: List[Dict[str, Any]],
+        base_seed: int = 42,
+        cache_augmentations: bool = True
+    ):
+        self.base_dataset = base_dataset
+        self.augmentation_configs = augmentation_configs
+        self.base_seed = base_seed
+        self.cache_augmentations = cache_augmentations
+        
+        # Pre-compute all samples if caching enabled
+        if cache_augmentations:
+            self._precompute_samples()
+        else:
+            # Calculate total length without pre-computing
+            self.num_subjects = len(base_dataset)
+            self.num_augmentations = len(augmentation_configs)
+            self._samples = None
+    
+    def _precompute_samples(self):
+        """Pre-compute all augmented samples."""
+        self._samples = []
+        
+        for subject_idx in range(len(self.base_dataset)):
+            augmented = self.base_dataset.get_multiple_augmentations(
+                subject_idx=subject_idx,
+                augmentation_configs=self.augmentation_configs,
+                base_seed=self.base_seed
+            )
+            
+            for aug_sample in augmented:
+                # Stack images as channels (C × D × H × W)
+                images_stacked = np.stack(aug_sample['images'], axis=0) if len(aug_sample['images']) > 1 else aug_sample['images'][0][np.newaxis, ...]
+                
+                sample = {
+                    'id': f"{aug_sample['meta']['subject_id']}_{aug_sample['name']}",
+                    'images': images_stacked,
+                    'rois': aug_sample['rois'],
+                    'labelmaps': aug_sample['labelmaps'],
+                    'meta': aug_sample['meta'],
+                    'augmentation_name': aug_sample['name']
+                    # Note: augmentation_config excluded to avoid PyTorch collate issues
+                }
+                
+                # Add label if present
+                if 'label' in aug_sample['meta']:
+                    sample['label'] = aug_sample['meta']['label']
+                
+                self._samples.append(sample)
+    
+    def __len__(self):
+        if self.cache_augmentations:
+            return len(self._samples)
+        else:
+            return len(self.base_dataset) * len(self.augmentation_configs)
+    
+    def __getitem__(self, idx: int):
+        if self.cache_augmentations:
+            return self._samples[idx]
+        else:
+            # Compute on-demand
+            subject_idx = idx // self.num_augmentations
+            aug_idx = idx % self.num_augmentations
+            
+            augmented = self.base_dataset.get_multiple_augmentations(
+                subject_idx=subject_idx,
+                augmentation_configs=[self.augmentation_configs[aug_idx]],
+                base_seed=self.base_seed
+            )
+            
+            aug_sample = augmented[0]
+            
+            # Stack images as channels (C × D × H × W)
+            images_stacked = np.stack(aug_sample['images'], axis=0) if len(aug_sample['images']) > 1 else aug_sample['images'][0][np.newaxis, ...]
+            
+            sample = {
+                'id': f"{aug_sample['meta']['subject_id']}_{aug_sample['name']}",
+                'images': images_stacked,
+                'rois': aug_sample['rois'],
+                'labelmaps': aug_sample['labelmaps'],
+                'meta': aug_sample['meta'],
+                'augmentation_name': aug_sample['name']
+            }
+            
+            # Add label if present
+            if 'label' in aug_sample['meta']:
+                sample['label'] = aug_sample['meta']['label']
+            
+            return sample

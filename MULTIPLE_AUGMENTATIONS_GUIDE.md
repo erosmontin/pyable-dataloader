@@ -267,9 +267,180 @@ The method validates inputs and provides clear error messages:
 2. **Set appropriate seeds** for reproducible experiments
 3. **Combine with caching** for better performance
 4. **Use `save_to_files=True`** when integrating with external tools like pyfe
-5. **Validate feature stability** by comparing extracted features across augmentations
+## PyTorch DataLoader Integration: `MultipleAugmentationDataset`
 
-## Example Radiomics Workflow
+For training PyTorch models with multiple augmentations per sample, use the `MultipleAugmentationDataset` wrapper class. This class expands each subject into multiple augmented samples, allowing standard PyTorch `DataLoader` batching.
+
+### Class Overview
+
+```python
+class MultipleAugmentationDataset(Dataset):
+    def __init__(
+        self,
+        base_dataset: PyableDataset,
+        augmentation_configs: List[Dict[str, Any]],
+        base_seed: int = 42,
+        cache_augmentations: bool = True
+    ):
+```
+
+### Parameters
+
+- `base_dataset`: PyableDataset instance to wrap
+- `augmentation_configs`: List of augmentation configurations (same format as `get_multiple_augmentations`)
+- `base_seed`: Base random seed for reproducibility
+- `cache_augmentations`: Pre-compute all augmentations (faster but uses more memory)
+
+### Key Features
+
+- **Automatic Expansion**: Converts N subjects × M augmentations into N×M total samples
+- **PyTorch Compatible**: Returns tensor-formatted samples compatible with DataLoader batching
+- **Memory Efficient**: Optional caching balances speed vs memory usage
+- **Reproducible**: Deterministic seeding ensures consistent augmentations
+
+### PyTorch DataLoader Usage
+
+```python
+from torch.utils.data import DataLoader
+from pyable_dataloader import PyableDataset, MultipleAugmentationDataset, Compose, RandomRotation, RandomTranslation
+
+# Create base dataset
+base_dataset = PyableDataset(
+    manifest='data/manifest.json',
+    target_size=[64, 64, 64],
+    target_spacing=1.0,
+    return_meta=True
+)
+
+# Define augmentation configurations
+augmentation_configs = [
+    {
+        'name': 'original',
+        'transforms': None
+    },
+    {
+        'name': 'rotated',
+        'transforms': Compose([
+            RandomRotation(rotation_range=[[-10, 10], [-10, 10], [-10, 10]], prob=1.0)
+        ])
+    },
+    {
+        'name': 'translated',
+        'transforms': Compose([
+            RandomTranslation(translation_range=[[-5, 5], [-5, 5], [-5, 5]], prob=1.0)
+        ])
+    }
+]
+
+# Create augmented dataset
+# 100 subjects × 3 augmentations = 300 total samples
+aug_dataset = MultipleAugmentationDataset(
+    base_dataset=base_dataset,
+    augmentation_configs=augmentation_configs,
+    base_seed=42,
+    cache_augmentations=True  # Pre-compute for faster training
+)
+
+# Use with PyTorch DataLoader
+train_loader = DataLoader(
+    aug_dataset,
+    batch_size=8,
+    shuffle=True,
+    num_workers=4
+)
+
+# Training loop
+for batch in train_loader:
+    images = batch['images']        # Shape: [8, C, D, H, W]
+    rois = batch['rois']           # List of ROI tensors
+    labels = batch['label']        # Classification labels (if available)
+    aug_names = batch['augmentation_name']  # Which augmentation was applied
+    
+    # Forward pass
+    outputs = model(images)
+    loss = criterion(outputs, labels)
+    
+    # Backward pass
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+```
+
+### Sample Structure
+
+Each sample returned by `MultipleAugmentationDataset` contains:
+
+```python
+{
+    'id': 'subject_001_rotated',           # Unique identifier
+    'images': tensor([C, D, H, W]),       # Stacked image channels
+    'rois': [tensor([D, H, W]), ...],     # ROI masks
+    'labelmaps': [tensor([D, H, W]), ...], # Label maps
+    'meta': {...},                        # Metadata dictionary
+    'augmentation_name': 'rotated'        # Augmentation type
+}
+```
+
+### Memory vs Speed Trade-offs
+
+- **cache_augmentations=True**: Pre-computes all augmented samples
+  - **Pros**: Fast iteration during training, reproducible across epochs
+  - **Cons**: Higher memory usage, longer initialization time
+  
+- **cache_augmentations=False**: Computes augmentations on-demand
+  - **Pros**: Lower memory usage, faster initialization
+  - **Cons**: Slower iteration, potential I/O bottlenecks with many workers
+
+### Best Practices
+
+1. **Use caching for small-to-medium datasets** (< 10,000 samples)
+2. **Set appropriate batch sizes** considering the expansion factor
+3. **Balance augmentation complexity** with training time
+4. **Monitor memory usage** when caching large datasets
+5. **Use deterministic seeding** for reproducible experiments
+
+### Advanced Usage: Custom Collate Function
+
+For more complex batching requirements, you can provide a custom collate function:
+
+```python
+from torch.utils.data import DataLoader
+import torch
+
+def custom_collate(batch):
+    """Custom collate function for advanced batching."""
+    # Separate different data types
+    images = torch.stack([item['images'] for item in batch])
+    rois = [item['rois'] for item in batch]  # Keep as list for variable-length
+    labels = torch.tensor([item['label'] for item in batch])
+    aug_names = [item['augmentation_name'] for item in batch]
+    
+    return {
+        'images': images,
+        'rois': rois,
+        'labels': labels,
+        'augmentation_names': aug_names
+    }
+
+loader = DataLoader(
+    aug_dataset,
+    batch_size=8,
+    collate_fn=custom_collate
+)
+```
+
+## Comparison: `get_multiple_augmentations` vs `MultipleAugmentationDataset`
+
+| Feature | `get_multiple_augmentations` | `MultipleAugmentationDataset` |
+|---------|-----------------------------|-------------------------------|
+| Use Case | Feature extraction, analysis | Model training, batching |
+| Output Format | List of dicts with numpy arrays | PyTorch Dataset with tensors |
+| PyTorch Integration | Manual conversion required | Direct DataLoader compatibility |
+| Memory Usage | Low (on-demand) | Variable (caching option) |
+| Performance | Good for small batches | Optimized for large-scale training |
+| Reproducibility | Manual seed management | Automatic deterministic seeding |
+
+Choose `get_multiple_augmentations` for radiomics analysis and `MultipleAugmentationDataset` for deep learning training workflows.
 
 ```python
 import pyfe
