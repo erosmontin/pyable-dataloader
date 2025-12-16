@@ -15,7 +15,7 @@ from .transforms import (
     RandomNoise,
 )
 
-__version__ = "3"
+__version__ = "3.0.5"
 
 __all__ = [
     "PyableDataset",
