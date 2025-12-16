@@ -1,404 +1,54 @@
-# PyAble DataLoader
+# pyable-dataloader
 
-**PyTorch DataLoader for Medical Images using pyable**
+A compact, opinionated dataloader for medical imaging built on top of the
+`pyable` Imaginable abstractions (SimpleITK-backed image objects). This
+project provides a focused Dataset implementation, a set of transforms, and
+manifest helpers useful as a starting point for training pipelines that need
+label-preserving spatial augmentations.
 
-A production-ready PyTorch Dataset for loading and preprocessing medical images (NIfTI, DICOM, etc.) with proper spatial transformations, ROI handling, and support for deep learning workflows.
+This repository intentionally keeps the code small and readable so teams and
+LLM-based assistants can extend transforms and integrate label-preserving
+spatial operations with minimal friction.
 
-## Key Features
+Key points
+- Imaginable-first: transforms prefer `pyable` Imaginable objects so spatial
+  transforms use SimpleITK under the hood and preserve labelmaps/ROIs.
+- `utils.update_manifest_with_reference`: create a canonical reference image
+  (size + spacing) per subject to guarantee consistent final array shapes.
+- `PyableDataset`: loads Imaginable objects, applies transforms, resamples to
+  the reference and returns numpy arrays and metadata.
 
-- ✅ **Proper Spatial Transformations**: Uses `pyable`'s resampling for correct spatial reference
-- ✅ **ROI-Aware Processing**: Centers images around ROI for maximum information preservation
-- ✅ **Label Preservation**: Automatic nearest-neighbor interpolation for segmentations
-- ✅ **Multi-Modal Support**: Stack multiple image sequences as channels
-- ✅ **Registration Integration**: Apply transforms from registration directly
-- ✅ **Caching**: Fast loading with automatic caching of preprocessed data
-- ✅ **Augmentation**: Medical imaging-aware data augmentation
-- ✅ **Debug Save**: Save processed images for manual inspection and pipeline verification
-- ✅ **Overlay Support**: Easy mapping from model outputs back to original space
-
-## Installation
-
-### Prerequisites
-
-- Python 3.8+
-- PyTorch
-- SimpleITK (installed with pyable)
-
-### 1. Install pyable (required dependency)
-
-```bash
-# Clone and install pyable
-cd /path/to/pyable
-pip install -e .
-```
-
-### 2. Install pyable-dataloader
-
-```bash
-cd /path/to/able-dataloader
-pip install -e .
-```
-
-### 3. (Optional) Install development dependencies
-
-```bash
-pip install -e .[dev]
-```
-
-### Verification
-
-```bash
-# Test import
-python -c "from pyable_dataloader import PyableDataset; print('✅ Import successful!')"
-
-# Run tests
-pytest tests/ -v
-```
-
-## Quick Start
-
-### Basic Usage
-
+Quick example
 ```python
-from pyable_dataloader import PyableDataset
-from torch.utils.data import DataLoader
+from pyable_dataloader.utils import update_manifest_with_reference
+from pyable_dataloader.dataset import PyableDataset
 
-# Create dataset from JSON manifest
-dataset = PyableDataset(
-    manifest='data/manifest.json',
-    target_size=[64, 64, 64],
-    target_spacing=2.0,
-    stack_channels=True
-)
-
-# Create PyTorch DataLoader
-loader = DataLoader(
-    dataset,
-    batch_size=4,
-    shuffle=True,
-    num_workers=4,
-    pin_memory=True
-)
-
-# Training loop
-for epoch in range(num_epochs):
-    for batch in loader:
-        images = batch['images']      # torch.Tensor: B × C × D × H × W
-        labels = batch['label']        # torch.Tensor: B (if present)
-        meta = batch['meta']          # dict with spacing, origin, etc.
-        
-        # Forward pass
-        outputs = model(images)
-        loss = criterion(outputs, labels)
-        
-        # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        
-        print(f"Batch shape: {images.shape}, Loss: {loss.item():.4f}")
-```
-
-### Debug Save Functionality
-
-For debugging and verifying your preprocessing pipeline, you can save the processed images that are sent to training:
-
-```python
-from pyable_dataloader import PyableDataset
-
-# Create dataset with debug save enabled
-dataset = PyableDataset(
-    manifest='data/manifest.json',
-    target_size=[64, 64, 64],
-    target_spacing=2.0,
-    transforms=train_transforms,
-    debug_save_dir='./debug_images',  # Directory to save processed images
-    debug_save_format='nifti'          # 'nifti' or 'numpy'
-)
-
-# Process first sample - images will be saved to ./debug_images/
-sample = dataset[0]
-
-# Files saved will include:
-# - subject_id_image_0.nii.gz (first image)
-# - subject_id_image_1.nii.gz (second image, if multi-modal)
-# - subject_id_roi_0.nii.gz (first ROI)
-# - subject_id_labelmap_0.nii.gz (first labelmap)
-```
-
-This saves images after all preprocessing (resampling, transforms, ROI masking) but before tensor conversion, allowing you to manually inspect what your model actually receives.
-
-### Complete Training Example
-
-```python
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-from pyable_dataloader import PyableDataset, Compose, IntensityNormalization, RandomFlip
-
-# Setup transforms
-train_transforms = Compose([
-    IntensityNormalization(method='zscore'),
-    RandomFlip(axes=[1, 2], prob=0.5)
-])
-
-# Create datasets
-train_dataset = PyableDataset(
-    manifest='data/train.json',
-    target_size=[64, 64, 64],
-    target_spacing=2.0,
-    transforms=train_transforms,
-    cache_dir='./cache/train'
-)
-
-val_dataset = PyableDataset(
-    manifest='data/val.json',
-    target_size=[64, 64, 64],
-    target_spacing=2.0,
-    cache_dir='./cache/val'
-)
-
-# Create dataloaders
-train_loader = DataLoader(
-    train_dataset, 
-    batch_size=8, 
-    shuffle=True, 
-    num_workers=4, 
-    pin_memory=True
-)
-
-val_loader = DataLoader(
-    val_dataset, 
-    batch_size=8, 
-    shuffle=False, 
-    num_workers=4, 
-    pin_memory=True
-)
-
-# Training loop
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = YourModel().to(device)
-optimizer = torch.optim.Adam(model.parameters())
-criterion = nn.CrossEntropyLoss()
-
-for epoch in range(100):
-    # Training
-    model.train()
-    train_loss = 0.0
-    for batch in train_loader:
-        images = batch['images'].to(device)
-        labels = batch['labels'].to(device)
-        
-        optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-        
-        train_loss += loss.item()
-    
-    # Validation
-    model.eval()
-    val_loss = 0.0
-    with torch.no_grad():
-        for batch in val_loader:
-            images = batch['images'].to(device)
-            labels = batch['labels'].to(device)
-            
-            outputs = model(images)
-            loss = criterion(outputs, labels)
-            val_loss += loss.item()
-    
-    print(f"Epoch {epoch+1}: Train Loss = {train_loss/len(train_loader):.4f}, "
-          f"Val Loss = {val_loss/len(val_loader):.4f}")
-```
-
-### Manifest Format
-
-#### JSON Format
-
-```json
-{
-    "subject_001": {
-        "images": [
-            "/data/sub001/T1w.nii.gz",
-            "/data/sub001/T2w.nii.gz"
-        ],
-        "rois": ["/data/sub001/brain_mask.nii.gz"],
-        "labelmaps": ["/data/sub001/segmentation.nii.gz"],
-        "reference": 0,
-        "label": 1.0
-    },
-    "subject_002": {
-        "images": ["/data/sub002/T1w.nii.gz"],
-        "rois": [],
-        "labelmaps": [],
-        "label": 0.0
+manifest = {
+    'subj1': {
+        'images': ['/path/to/image.nii.gz'],
+        'labelmaps': ['/path/to/seg.nii.gz']
     }
 }
+
+# Create a 64x64x64 reference at 2mm spacing and update manifest
+manifest = update_manifest_with_reference(manifest, resolution=[2,2,2], target_size=[64,64,64])
+
+ds = PyableDataset(manifest=manifest, transforms=None)
+sample = ds[0]
+print(sample['images'].shape)  # (C, D, H, W)
 ```
 
-#### CSV Format
+Development notes
+- Activate the expected conda environment: `conda activate able` (project
+  tooling and examples assume this env).
+- Prefer implementing spatial transforms using Imaginable methods
+  (`rotateImage`, `translateImage`, `applyTransform`, etc.) so labelmaps
+  remain intact (nearest-neighbor resampling automatically used for label
+  objects).
 
-```csv
-id,image_paths,roi_paths,labelmap_paths,reference,label
-sub001,"['/data/sub001/T1.nii.gz','/data/sub001/T2.nii.gz']",/data/sub001/mask.nii.gz,,0,1.0
-sub002,/data/sub002/T1.nii.gz,,,first,0.0
-```
-
-## Architecture Overview
-
-### Data Flow Diagram
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                          INPUT DATA                                     │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  Manifest (JSON/CSV)              Medical Images (NIfTI/DICOM)         │
-│  ┌──────────────────┐             ┌──────────────┐                     │
-│  │ subject_001:     │             │ T1.nii.gz    │                     │
-│  │   images: [...]  │────────────>│ T2.nii.gz    │                     │
-│  │   rois: [...]    │             │ FLAIR.nii.gz │                     │
-│  │   label: 1.0     │             └──────────────┘                     │
-│  └──────────────────┘             ┌──────────────┐                     │
-│                                    │ roi.nii.gz   │                     │
-│                                    └──────────────┘                     │
-└─────────────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    PyableDataset.__getitem__(idx)                       │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  Step 1: Load with pyable                                              │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │ img = SITKImaginable(filename)                                   │  │
-│  │ roi = Roiable(filename)                                          │  │
-│  │ img.resampleOnCanonicalSpace()  # Ensures LPS orientation        │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│                              │                                          │
-│                              ▼                                          │
-│  Step 2: Select Reference Space                                        │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │ reference = select_reference(images)                             │  │
-│  │   - First image                                                  │  │
-│  │   - Largest image                                                │  │
-│  │   - Custom function                                              │  │
-│  │   - Global template                                              │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│                              │                                          │
-│                              ▼                                          │
-│  Step 3: Compute ROI Center (if needed)                                │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │ roi_center = compute_roi_center(roi)                             │  │
-│  │ # Physical coordinates (X, Y, Z) in mm                           │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│                              │                                          │
-│                              ▼                                          │
-│  Step 4: Create Centered Reference                                     │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │ centered_ref = create_centered_reference(                        │  │
-│  │     source_image,                                                │  │
-│  │     roi_center,                                                  │  │
-│  │     target_size,                                                 │  │
-│  │     target_spacing                                               │  │
-│  │ )                                                                │  │
-│  │ # Centers volume around ROI to maximize information              │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│                              │                                          │
-│                              ▼                                          │
-│  Step 5: Resample All Images                                           │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │ for img in images:                                               │  │
-│  │     img.resampleOnTargetImage(reference)                      │  │
-│  │     # Linear interpolation for images                            │  │
-│  │                                                                  │  │
-│  │ for roi in rois:                                                 │  │
-│  │     roi.resampleOnTargetImage(reference)                      │  │
-│  │     # Nearest-neighbor for labels (automatic!)                   │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│                              │                                          │
-│                              ▼                                          │
-│  Step 6: Convert to NumPy                                              │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │ arrays = [img.getImageAsNumpy() for img in images]              │  │
-│  │ # Returns (Z, Y, X) format - pyable v3 convention!              │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│                              │                                          │
-│                              ▼                                          │
-│  Step 7: Apply ROI Masking (if enabled)                                │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │ if mask_with_roi:                                                │  │
-│  │     combined_mask = np.any([roi > 0 for roi in rois], axis=0)   │  │
-│  │     images = [arr * combined_mask for arr in images]            │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│                              │                                          │
-│                              ▼                                          │
-│  Step 8: Stack Channels (if enabled)                                   │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │ if stack_channels and len(images) > 1:                           │  │
-│  │     images = np.stack(images, axis=0)  # C × Z × Y × X           │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│                              │                                          │
-│                              ▼                                          │
-│  Step 9: Apply Transforms (if provided)                                │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │ if transforms is not None:                                       │  │
-│  │     images, rois, labelmaps = transforms(                        │  │
-│  │         images, rois, labelmaps, meta                            │  │
-│  │     )                                                            │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│                              │                                          │
-│                              ▼                                          │
-│  Step 10: Cache Results                                               │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │ save_to_cache(cache_path, images, rois, labelmaps, meta)        │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                            OUTPUT                                       │
-├─────────────────────────────────────────────────────────────────────────┤
-│  {                                                                    │
-│    'id': 'subject_001',                                              │
-│    'images': torch.Tensor(C × D × H × W),                            │
-│    'rois': [torch.Tensor(D × H × W), ...],                           │
-│    'labelmaps': [torch.Tensor(D × H × W), ...],                      │
-│    'meta': {                                                         │
-│      'spacing': [2.0, 2.0, 2.0],                                     │
-│      'origin': [0.0, 0.0, 0.0],                                      │
-│      'direction': [...],                                             │
-│      ...                                                             │
-│    }                                                                 │
-│  }                                                                   │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-### Key Components
-
-- **PyableDataset**: Main dataset class with spatial awareness
-- **Transforms**: Composable augmentation pipeline
-- **Caching**: Content-based caching for performance
-- **Overlay**: Functions to map results back to original space
-
-## Advanced Usage
-
-### Non-PyTorch Usage (Feature Extraction)
-
-For feature extraction or other non-PyTorch applications (like pyfe), use `get_numpy_item()` to get numpy arrays, NIfTI images, or pyable objects instead of PyTorch tensors.
-
-#### Basic Numpy Arrays
-
-```python
-from pyable_dataloader import PyableDataset
-
-dataset = PyableDataset(
-    manifest='data/manifest.json',
-    target_size=[64, 64, 64],
-    target_spacing=2.0
-)
+If you want, I can add a few small, deterministic examples and tests focused
+on the most common workflows (resampling, a single spatial transform, and a
+labelmap-preserving augmentation). Ask and I'll add them.
 
 # Get numpy arrays for feature extraction
 sample = dataset.get_numpy_item(0)

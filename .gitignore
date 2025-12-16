@@ -10,3 +10,4 @@ build/
 testenv/
 dist/
 *.pth
+debug_outputs/
