@@ -32,6 +32,25 @@ except ImportError:
     )
 
 
+def orient_to_lps(sitk_image: sitk.Image, target_orientation: str = 'LPS') -> sitk.Image:
+    """
+    Reorient a SimpleITK image to the target orientation using DICOMOrientImageFilter.
+    
+    This is more reliable than pyable's resampleOnCanonicalSpace() which can 
+    return zeros for some images.
+    
+    Args:
+        sitk_image: Input SimpleITK image
+        target_orientation: Target orientation string (default 'LPS')
+    
+    Returns:
+        Reoriented SimpleITK image
+    """
+    orient_filter = sitk.DICOMOrientImageFilter()
+    orient_filter.SetDesiredCoordinateOrientation(target_orientation)
+    return orient_filter.Execute(sitk_image)
+
+
 class PyableDataset(Dataset):
     """
     PyTorch Dataset for loading medical images via pyable.
@@ -469,16 +488,16 @@ class PyableDataset(Dataset):
         if not images:
             raise ValueError(f"No images found for subject {subject_id}")
         
-        # Standardize orientation
+        # Standardize orientation to LPS using pyable's dicomOrient method
         for img in images:
-            img.resampleOnCanonicalSpace()  # Ensures LPS axis-aligned
+            img.dicomOrient(self.orientation)
         
         # Load ROIs
         rois = []
         roi_center = None
         for roi_path in item.get('rois', []):
             roi = Roiable(filename=roi_path)
-            roi.resampleOnCanonicalSpace()
+            roi.dicomOrient(self.orientation)
             
             # Filter labels if requested
             if self.roi_labels is not None:
@@ -494,7 +513,7 @@ class PyableDataset(Dataset):
         labelmaps = []
         for lm_path in item.get('labelmaps', []):
             lm = LabelMapable(filename=lm_path)
-            lm.resampleOnCanonicalSpace()
+            lm.dicomOrient(self.orientation)
             labelmaps.append(lm)
         
         # Determine reference space
@@ -527,14 +546,40 @@ class PyableDataset(Dataset):
             lm_copy.resampleOnTargetImage(reference)
             resampled_labelmaps.append(lm_copy)
         
+        # Collect metadata (needed by transforms)
+        meta = {
+            'subject_id': subject_id,
+            'spacing': list(reference.getImageSpacing()),
+            'origin': list(reference.getImageOrigin()),
+            'direction': list(reference.getImageDirection()),
+            'size': list(reference.getImageSize()),
+        }
+        
+        # Add roi_center only if available (don't include None values which break collation)
+        if roi_center is not None:
+            meta['roi_center'] = roi_center
+        
+        # Add label if present in manifest
+        if 'label' in item:
+            meta['label'] = item['label']
+        
         # Apply transforms if provided
         if self.transforms is not None:
             resampled_images, resampled_rois, resampled_labelmaps = self.transforms(resampled_images, resampled_rois, resampled_labelmaps, meta)
         
-        # Convert to numpy arrays (ZYX format in v3)
-        image_arrays = [img.getImageAsNumpy() for img in resampled_images]
-        roi_arrays = [roi.getImageAsNumpy() for roi in resampled_rois]
-        labelmap_arrays = [lm.getImageAsNumpy() for lm in resampled_labelmaps]
+        # Convert to numpy arrays (ZYX format in v3) - handle both Imaginable and numpy array types
+        def to_numpy(obj):
+            """Convert object to numpy array, handling both Imaginable and numpy types."""
+            if hasattr(obj, 'getImageAsNumpy'):
+                return obj.getImageAsNumpy()
+            elif isinstance(obj, np.ndarray):
+                return obj
+            else:
+                raise TypeError(f"Cannot convert {type(obj)} to numpy array")
+        
+        image_arrays = [to_numpy(img) for img in resampled_images]
+        roi_arrays = [to_numpy(roi) for roi in resampled_rois]
+        labelmap_arrays = [to_numpy(lm) for lm in resampled_labelmaps]
         
         # Apply ROI masking if requested
         if self.mask_with_roi and roi_arrays:
@@ -551,25 +596,15 @@ class PyableDataset(Dataset):
         else:
             images_array = np.zeros(self.target_size)
         
-        # Collect metadata
-        meta = {
-            'subject_id': subject_id,
-            'spacing': reference.getImageSpacing(),
-            'origin': reference.getImageOrigin(),
-            'direction': reference.getImageDirection(),
-            'size': reference.getImageSize(),
+        # Update metadata with additional fields
+        meta.update({
             'orientation': reference.getOrientationCode(),
             'source_paths': {
                 'images': item.get('images', []),
                 'rois': item.get('rois', []),
                 'labelmaps': item.get('labelmaps', [])
-            },
-            'roi_center': roi_center
-        }
-        
-        # Add label if present
-        if 'label' in item:
-            meta['label'] = item['label']
+            }
+        })
         
         # Save to cache
         self._save_to_cache(cache_path, images_array, roi_arrays, labelmap_arrays, meta)
