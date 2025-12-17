@@ -137,6 +137,35 @@ Transforms and augmentation
 - Where performance matters, precompute deterministic augmentations and cache
   them on disk; keep random augmentations on-the-fly.
 
+Labelmap encoding and consistent channels
+----------------------------------------
+
+Two new transforms help make label encoding explicit and consistent across
+datasets:
+
+- `LabelMapOneHot(values=..., keep_original=False)`: converts labelmaps into
+  one-hot binary masks. Use `values` to declare the full set of labels you
+  expect across the dataset; this guarantees the same channel ordering even if
+  some labels are missing in an individual volume.
+- `LabelMapContiguous(values=..., keep_original=False)`: remaps arbitrary
+  label integers to contiguous integers starting at 1 (0 remains background).
+
+Usage patterns:
+
+- Supply `values` explicitly when creating the transform:
+
+```python
+from pyable_dataloader.transforms import LabelMapOneHot
+lm = LabelMapOneHot(values=[1,2,3], keep_original=False)
+```
+
+- Or set `manifest[subject]['meta']['labelmap_values'] = [1,2,3]` so the
+  transform reads the list at runtime. The transform prefers constructor
+  `values`, then `meta`, then falls back to per-image detection.
+
+Both transforms write a mapping entry back to `meta` (under the configured
+`meta_key`) so pipelines can decode predictions to original label IDs.
+
 Debugging tips
 --------------
 - If SimpleITK raises dtype or shape errors, inspect types passed into

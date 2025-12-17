@@ -13,6 +13,43 @@ from typing import List, Tuple, Callable, Optional, Union
 from scipy import ndimage
 import SimpleITK as sitk
 
+
+def _normalize_label_values(vals) -> np.ndarray:
+    """Normalize various `vals` inputs into a 1-D sorted numpy int array.
+
+    Accepts scalars, lists, tuples, sets, numpy arrays, nested containers.
+    Filters out non-convertible entries and returns a sorted unique int array.
+    """
+    if vals is None:
+        return np.array([], dtype=int)
+    if np.isscalar(vals):
+        try:
+            return np.array([int(vals)], dtype=int)
+        except Exception:
+            return np.array([], dtype=int)
+
+    # Convert to object array to safely iterate nested containers
+    vals_arr = np.asarray(vals, dtype=object)
+    flat = []
+    for el in np.ravel(vals_arr):
+        if isinstance(el, (list, tuple, set, np.ndarray)):
+            for sub in el:
+                try:
+                    flat.append(int(sub))
+                except Exception:
+                    continue
+        else:
+            try:
+                flat.append(int(el))
+            except Exception:
+                continue
+
+    if not flat:
+        return np.array([], dtype=int)
+
+    # Return sorted unique ints
+    return np.array(sorted(set(flat)), dtype=int)
+
 try:
     from pyable.imaginable import SITKImaginable, Roiable, LabelMapable
 except Exception:
@@ -57,6 +94,238 @@ class Compose(MedicalImageTransform):
         for t in self.transforms:
             images, rois, labelmaps = t(images, rois, labelmaps, meta)
         return images, rois, labelmaps
+
+
+class LabelMapOneHot(MedicalImageTransform):
+    """
+    Convert labelmap values to one-hot masks. Prefers explicit `values` passed to
+    the transform or values present in `meta` under `meta_key`. Falls back to
+    detecting unique values from the labelmap.
+
+    Args:
+        exclude_background: If True, exclude label value 0 from one-hot channels
+        as_images: If True, append the one-hot channels to `images` (as additional channels).
+                   Default False (returns one-hot masks in `labelmaps`).
+        keep_original: If True, keep the original labelmap in the returned `labelmaps` list
+                       (original will be the first element).
+        meta_key: key to read/store mapping info in `meta` (useful to decode predictions).
+        values: Optional explicit list of label values to use for all labelmaps.
+    """
+
+    def __init__(self, exclude_background: bool = True, as_images: bool = False,  meta_key: str = 'labelmap_values', values: Optional[List[int]] = None):
+        self.exclude_background = exclude_background
+        self.as_images = as_images
+        self.meta_key = meta_key
+        self.values = None if values is None else np.asarray(values)
+
+    def __call__(self, images, rois, labelmaps, meta):
+        if not labelmaps:
+            return images, rois, labelmaps
+        new_labelmaps = []
+        mappings = []
+        channel_map = []
+        global_channel = 0
+
+        for i, lm in enumerate(labelmaps):
+            # Extract numpy array and SimpleITK image if available
+            if hasattr(lm, 'getImageAsNumpy'):
+                arr = lm.getImageAsNumpy()
+                sitk_img = lm.getImage()
+            else:
+                arr = np.asarray(lm)
+                sitk_img = None
+
+            # Determine label values to encode (explicit -> meta -> image unique)
+            if self.values is not None:
+                vals = _normalize_label_values(self.values)
+            elif meta is not None and isinstance(meta, dict) and self.meta_key in meta:
+                mv = meta.get(self.meta_key)
+                # support meta being list-of-lists or list-of-dicts
+                if isinstance(mv, (list, tuple)) and len(mv) > i:
+                    entry = mv[i]
+                    if isinstance(entry, dict) and 'values' in entry:
+                        vals = _normalize_label_values(entry['values'])
+                    else:
+                        vals = _normalize_label_values(entry)
+                else:
+                    vals = _normalize_label_values(mv)
+            else:
+                vals = _normalize_label_values(np.unique(arr))
+
+            if self.exclude_background:
+                vals = vals[vals != 0]
+
+            # Record per-labelmap mapping
+            mappings.append({'values': vals.tolist()})
+
+            if vals.size == 0:
+                # No channels for this labelmap
+                continue
+
+            channels = []
+            for j, v in enumerate(vals):
+                mask = None
+                # Prefer Roiable path using SITK boolean comparison when possible
+                if sitk_img is not None and Roiable is not None:
+                    try:
+                        sitk_mask = sitk_img == int(v)
+                        # Ensure binary uint8 type and copy spatial info
+                        try:
+                            sitk_mask = sitk.Cast(sitk_mask, sitk.sitkUInt8)
+                        except Exception:
+                            pass
+                        try:
+                            sitk_mask.CopyInformation(sitk_img)
+                        except Exception:
+                            pass
+
+                        roi_obj = Roiable(image=sitk_mask)
+                        roi_arr = None
+                        try:
+                            roi_arr = roi_obj.getImageAsNumpy()
+                        except Exception:
+                            roi_arr = None
+
+                        # If Roiable produced an empty image, fall back to SITK array
+                        if roi_arr is None or (isinstance(roi_arr, np.ndarray) and roi_arr.sum() == 0):
+                            sitk_arr = sitk.GetArrayFromImage(sitk_mask)
+                            if sitk_arr.sum() > 0:
+                                mask = sitk_arr.astype(np.uint8)
+                            else:
+                                mask = None
+                        else:
+                            mask = roi_arr.astype(np.uint8)
+                    except Exception:
+                        mask = None
+
+                if mask is None:
+                    mask = (arr == v).astype(np.uint8)
+
+                channels.append(mask)
+
+                # Append channel mapping
+                channel_map.append({
+                    'labelmap_index': int(i),
+                    'label_value': int(v),
+                    'local_channel': int(j),
+                    'global_channel': int(global_channel)
+                })
+                global_channel += 1
+
+            # Append each channel as separate 3D labelmap (backwards-compatible)
+            for c in channels:
+                new_labelmaps.append(c)
+
+            # Optionally append channels to images
+            if self.as_images:
+                try:
+                    if isinstance(images, list):
+                        for c in channels:
+                            images.append(c)
+                    else:
+                        if images.ndim == 4:
+                            images = np.concatenate([images, np.stack(channels, axis=0)], axis=0)
+                        elif images.ndim == 3:
+                            images = np.concatenate([np.expand_dims(images, 0), np.stack(channels, axis=0)], axis=0)
+                except Exception:
+                    pass
+
+        # Write mappings into meta for downstream decoding
+        if meta is not None:
+            meta[self.meta_key] = mappings
+            meta_key_channels = f"{self.meta_key}_channels"
+            meta[meta_key_channels] = channel_map
+
+        return images, rois, new_labelmaps
+
+
+class LabelMapContiguous(MedicalImageTransform):
+    """
+    Remap labelmap values to contiguous integer labels (1..N) while keeping 0 as background.
+
+    Prefers explicit `values` passed to the transform or values present in `meta` under `meta_key`.
+
+    Args:
+        exclude_background: If True, do not include 0 in remapping (0 stays 0)
+        keep_original: If True, keep the original labelmap in the returned list (first element)
+        meta_key: key to read/store mapping original->contiguous in `meta` for decoding
+        values: Optional explicit list of label values to use for remapping
+    """
+
+    def __init__(self, exclude_background: bool = True, keep_original: bool = False, meta_key: str = 'labelmap_mapping', values: Optional[List[int]] = None):
+        self.exclude_background = exclude_background
+        self.keep_original = keep_original
+        self.meta_key = meta_key
+        self.values = None if values is None else np.asarray(values)
+
+    def __call__(self, images, rois, labelmaps, meta):
+        if not labelmaps:
+            return images, rois, labelmaps
+
+        new_labelmaps = []
+        mappings = []
+        channel_map = []
+        global_channel = 0
+
+        for i, lm in enumerate(labelmaps):
+            # Load array from Imaginable or numpy
+            if hasattr(lm, 'getImageAsNumpy'):
+                arr = lm.getImageAsNumpy()
+            else:
+                arr = lm if isinstance(lm, np.ndarray) else np.asarray(lm)
+
+            # Determine label values to remap (constructor -> meta -> image unique)
+            if self.values is not None:
+                vals = _normalize_label_values(self.values)
+            elif meta is not None and isinstance(meta, dict) and self.meta_key in meta:
+                mv = meta.get(self.meta_key)
+                if isinstance(mv, (list, tuple)) and len(mv) > i:
+                    entry = mv[i]
+                    if isinstance(entry, dict) and 'values' in entry:
+                        vals = _normalize_label_values(entry['values'])
+                    else:
+                        vals = _normalize_label_values(entry)
+                else:
+                    vals = _normalize_label_values(mv)
+            else:
+                vals = _normalize_label_values(np.unique(arr))
+
+            if self.exclude_background:
+                vals = vals[vals != 0]
+
+            # Build contiguous mapping: original value -> new label (1..N), 0 reserved for background
+            mapping = {}
+            out_dtype = arr.dtype if np.issubdtype(arr.dtype, np.integer) else np.int32
+            out = np.zeros_like(arr, dtype=out_dtype)
+
+            if vals.size > 0:
+                for j, v in enumerate(vals, start=1):
+                    out[arr == v] = j
+                    mapping[int(v)] = int(j)
+
+            # Optionally keep original labelmap
+            if self.keep_original:
+                new_labelmaps.append(arr)
+
+            new_labelmaps.append(out)
+            mappings.append(mapping)
+
+            # For contiguous output, each labelmap produces one output channel (the remapped map)
+            channel_map.append({
+                'labelmap_index': int(i),
+                'label_values': vals.tolist(),
+                'contiguous_map': mapping,
+                'global_channel': int(global_channel)
+            })
+            global_channel += 1
+
+        # Persist mapping info into meta for downstream decoding
+        if meta is not None:
+            meta[self.meta_key] = mappings
+            meta_key_channels = f"{self.meta_key}_channels"
+            meta[meta_key_channels] = channel_map
+
+        return images, rois, new_labelmaps
 
 
 class IntensityNormalization(MedicalImageTransform):

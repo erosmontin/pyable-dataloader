@@ -10,6 +10,7 @@ except ImportError:
         "  cd pyable && pip install -e ."
     )
 
+import uuid
 
 class PyableDataset(Dataset):
     """
@@ -53,9 +54,57 @@ class PyableDataset(Dataset):
     def __getitem__(self, idx):
         subject_id = self.ids[idx]
         item = self.data[subject_id]
+        # Support multiple manifest key variants for backward compatibility
+        roivalue = item.get('roivalues', item.get('roi_values', item.get('roivalue', 1)))
+        labelmapsvalue = item.get('labelmapvalues', item.get('labelmap_values', item.get('labelmapvalue', None)))
         images = [SITKImaginable(filename=p) for p in item.get('images', [])]
         labelmaps = [LabelMapable(filename=p) for p in item.get('labelmaps', [])]
-        rois = [Roiable(filename=p) for p in item.get('rois', [])]
+        # Apply filterValues per-labelmap. Support several manifest formats:
+        # - flat list of ints: apply same list to every labelmap
+        # - list-of-lists: apply entry i to labelmaps[i]
+        # - scalar/int: apply that scalar
+        if labelmapsvalue is not None:
+            normalized_labelmap_values = labelmapsvalue
+            # If it's a numpy array, convert to python types for introspection
+            try:
+                import numpy as _np
+                if isinstance(normalized_labelmap_values, _np.ndarray):
+                    normalized_labelmap_values = normalized_labelmap_values.tolist()
+            except Exception:
+                pass
+
+            new_labelmaps = []
+            for i, lm in enumerate(labelmaps):
+                lv = None
+                # If the manifest provided a list-of-lists (per-labelmap), use the i-th entry
+                if isinstance(normalized_labelmap_values, (list, tuple)) and len(normalized_labelmap_values) > 0:
+                    # Detect flat list of ints (apply same to all) vs list-of-lists
+                    first = normalized_labelmap_values[0]
+                    if isinstance(first, (list, tuple)) or (hasattr(first, '__iter__') and not isinstance(first, (str, bytes)) and not isinstance(first, int)):
+                        # list-of-lists: try to get ith entry
+                        if len(normalized_labelmap_values) > i:
+                            lv = normalized_labelmap_values[i]
+                        else:
+                            lv = None
+                    else:
+                        # flat list of ints: apply to every labelmap
+                        lv = normalized_labelmap_values
+                else:
+                    # scalar or other: pass through
+                    lv = normalized_labelmap_values
+
+                try:
+                    if lv is not None:
+                        new_labelmaps.append(lm.filterValues(lv))
+                    else:
+                        new_labelmaps.append(lm)
+                except Exception:
+                    # If filterValues fails for any reason, keep original labelmap
+                    new_labelmaps.append(lm)
+
+            labelmaps = new_labelmaps
+        rois = [Roiable(filename=p, roivalue=roivalue) for p in item.get('rois', [])]
+        
         # Prepare for batch transform pipeline
         
         ref_path = item.get('reference', None)
@@ -91,7 +140,26 @@ class PyableDataset(Dataset):
                     # Use float indices for TransformContinuousIndexToPhysicalPoint
                     idx = (float(size[0]) / 2.0, float(size[1]) / 2.0, float(size[2]) / 2.0)
                     cir = padded_reference.getCoordinatesFromIndex(idx)
+            # Build meta and include any manifest-provided label/roi value hints so
+            # transforms (e.g., LabelMapOneHot) can read consistent label lists.
             meta = {'center': cir}
+            # Normalize and attach manifest label/roi hints to meta under the
+            # canonical keys expected by transforms.
+            if labelmapsvalue is not None:
+                # If user provided a flat list of ints for a single labelmap, wrap
+                # as a list-of-lists so downstream code can index per-labelmap.
+                if isinstance(labelmapsvalue, (list, tuple)) and labelmapsvalue and all(isinstance(x, (int, np.integer)) for x in labelmapsvalue):
+                    meta['labelmap_values'] = [list(labelmapsvalue)
+                                               ]
+                else:
+                    meta['labelmap_values'] = labelmapsvalue
+            else:
+                meta['labelmap_values'] = None
+
+            if roivalue is not None:
+                meta['roi_values'] = roivalue
+            else:
+                meta['roi_values'] = None
 
             # Batch transform pipeline
             if self.transforms is not None:
@@ -150,7 +218,7 @@ class PyableDataset(Dataset):
                 ref_for_conversion = padded_reference if 'padded_reference' in locals() else (reference if 'reference' in locals() else None)
 
                 images = _ensure_imaginable_list(images, SITKImaginable, ref_for_conversion)
-                labelmaps = _ensure_imaginable_list(labelmaps, LabelMapable, ref_for_conversion)
+                labelmaps = _ensure_imaginable_list(labelmaps, LabelMapable, lm)
                 rois = _ensure_imaginable_list(rois, Roiable, ref_for_conversion)
             # After all transforms, resample each to the original reference
             images = [img.resampleOnTargetImage(reference) for img in images]
@@ -159,16 +227,16 @@ class PyableDataset(Dataset):
 
             # Debug save transformed images, labelmaps, rois
             if self.debug_save_dir is not None:
+                _s=str(uuid.uuid4()).split('-')[0]
                 from pathlib import Path
                 debug_dir = Path(self.debug_save_dir)
                 debug_dir.mkdir(parents=True, exist_ok=True)
                 for i, img in enumerate(images):
-                    img.writeImageAs(str(debug_dir / f"{subject_id}_transformed_image_{i}.nii.gz"))
+                    img.writeImageAs(str(debug_dir / f"{_s}_{subject_id}_transformed_image_{i}.nii.gz"))
                 for i, lm in enumerate(labelmaps):
-                    lm.writeImageAs(str(debug_dir / f"{subject_id}_transformed_labelmap_{i}.nii.gz"))
+                    lm.writeImageAs(str(debug_dir / f"{_s}_{subject_id}_transformed_labelmap_{i}.nii.gz"))
                 for i, roi in enumerate(rois):
-                    roi.writeImageAs(str(debug_dir / f"{subject_id}_transformed_roi_{i}.nii.gz"))
-
+                    roi.writeImageAs(str(debug_dir / f"{_s}_{subject_id}_transformed_roi_{i}.nii.gz"))
             meta = {
                 'subject_id': subject_id,
                 'spacing': reference.getImageSpacing(),

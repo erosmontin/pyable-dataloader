@@ -2,6 +2,26 @@ from pyable import imaginable as ima
 import tempfile
 import numpy as np
 
+def update_manifest_with_roivalues(manifest, roivalue):
+    """
+    Update the manifest to include 'roivalues' for each subject based on the provided roivalues_dict.
+    roivalues_dict should be a dictionary mapping subject IDs to lists of ROI values.
+    """
+    updated_manifest = manifest.copy()
+    for k,v in manifest.items():
+        updated_manifest[k]['roivalues'] = roivalue
+    return updated_manifest
+
+def update_manifest_with_labelmapvalues(manifest, labelmapvalues):
+    """
+    Update the manifest to include 'labelmapvalues' for each subject based on the provided labelmapvalues_dict.
+    labelmapvalues_dict should be a dictionary mapping subject IDs to lists of ROI values.
+    """
+    updated_manifest = manifest.copy()
+    for k,v in manifest.items():
+        updated_manifest[k]['labelmapvalues'] = labelmapvalues
+    return updated_manifest
+
 def update_manifest_with_reference(manifest, orientation='LPS', resolution=[2.0, 2.0, 2.0], reference_idx=0, target_size=None):
     """
     For each subject in the manifest, create a reference image with the specified orientation and resolution,

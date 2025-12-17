@@ -121,3 +121,45 @@ python -m examples.some_example  # if an example exists
 If you'd like, I can also add a small test harness in `tests/` with a few
 synthetic cases and a helper function that creates tiny Imaginable objects
 for faster local testing.
+
+Labelmap encoding transforms
+---------------------------
+
+This repository now provides two labelmap encoding transforms in
+`src/pyable_dataloader/transforms.py`: `LabelMapOneHot` and
+`LabelMapContiguous`.
+
+- `LabelMapOneHot`: converts a labelmap into per-label binary masks (one-hot
+  channels). Options: `exclude_background` (omit value 0), `as_images` (append
+  channels to `images`), and `keep_original` (retain the original labelmap as
+  the first element of the returned `labelmaps`).
+- `LabelMapContiguous`: remaps arbitrary label values to contiguous integers
+  (1..N) while keeping 0 as background. Options: `exclude_background` and
+  `keep_original`.
+
+How to ensure consistent channels across your dataset
+-----------------------------------------------------
+
+Per-image unique-value detection may omit labels that are absent in a
+particular volume, causing inconsistent channel counts across samples. To
+avoid this, prefer one of the following approaches:
+
+- Provide a global label list when constructing the transform:
+
+```python
+from pyable_dataloader.transforms import LabelMapOneHot
+onehot = LabelMapOneHot(values=[1,2,3], keep_original=False)
+```
+
+- Or add the label list into the sample `meta` in your manifest so the
+  transform can read it at runtime (default meta key: `'labelmap_values'`):
+
+```python
+manifest['FT1013']['meta'] = {'labelmap_values': [1,2,3]}
+```
+
+The transform prefers (in order): explicit `values` passed to the
+constructor, a list found in `meta[self.meta_key]`, then per-image
+`getImageUniqueValues()`/`np.unique()` as a fallback. Both transforms store
+their detected or applied mapping in `meta` under the configured `meta_key`
+so downstream decoding is straightforward.
