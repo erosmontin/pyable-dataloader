@@ -27,9 +27,9 @@ def main():
     manifest = update_manifest_with_reference(
         manifest,
         orientation='LPS',
-        resolution=[1.0, 1.0, 1.0],
+        resolution=[4.0, 4.0, 4.0],
         reference_idx=0,
-        target_size=[20, 80, 80],
+        target_size=[20, 40, 40],
         target_output_dir='debug_outputs/simple_dataset_test'
     )
 
