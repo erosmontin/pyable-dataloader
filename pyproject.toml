@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyable-dataloader"
-version = "3.0.5"
+version = "3.0.6"
 description = "PyTorch DataLoader for medical images using pyable"
 readme = "README.md"
 authors = [

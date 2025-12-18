@@ -214,14 +214,31 @@ class LabelMapOneHot(MedicalImageTransform):
 
             # Append each channel as separate 3D labelmap (backwards-compatible)
             for c in channels:
-                new_labelmaps.append(c)
+                # If original labelmap was an Imaginable, wrap channel into LabelMapable
+                if hasattr(lm, 'getImage') and LabelMapable is not None:
+                    try:
+                        lm_obj = LabelMapable()
+                        ref = lm.getImage()
+                        lm_obj.setImageFromNumpy(c, refimage=ref)
+                        new_labelmaps.append(lm_obj)
+                    except Exception:
+                        new_labelmaps.append(c)
+                else:
+                    new_labelmaps.append(c)
 
             # Optionally append channels to images
             if self.as_images:
                 try:
-                    if isinstance(images, list):
+                    # If images were Imaginable objects, wrap channel arrays into SITKImaginable
+                    if isinstance(images, list) and images and hasattr(images[0], 'getImageAsNumpy'):
                         for c in channels:
-                            images.append(c)
+                            try:
+                                img_obj = SITKImaginable()
+                                refimg = images[0].getImage()
+                                img_obj.setImageFromNumpy(c, refimage=refimg)
+                                images.append(img_obj)
+                            except Exception:
+                                images.append(c)
                     else:
                         if images.ndim == 4:
                             images = np.concatenate([images, np.stack(channels, axis=0)], axis=0)
@@ -305,9 +322,27 @@ class LabelMapContiguous(MedicalImageTransform):
 
             # Optionally keep original labelmap
             if self.keep_original:
-                new_labelmaps.append(arr)
-
-            new_labelmaps.append(out)
+                if hasattr(lm, 'getImage') and LabelMapable is not None:
+                    try:
+                        orig = LabelMapable()
+                        ref = lm.getImage() if hasattr(lm, 'getImage') else None
+                        orig.setImageFromNumpy(arr, refimage=ref)
+                        new_labelmaps.append(orig)
+                    except Exception:
+                        new_labelmaps.append(arr)
+                else:
+                    new_labelmaps.append(arr)
+            # Wrap contiguous output as LabelMapable when possible
+            if hasattr(lm, 'getImage') and LabelMapable is not None:
+                try:
+                    out_obj = LabelMapable()
+                    ref = lm.getImage() if hasattr(lm, 'getImage') else None
+                    out_obj.setImageFromNumpy(out, refimage=ref)
+                    new_labelmaps.append(out_obj)
+                except Exception:
+                    new_labelmaps.append(out)
+            else:
+                new_labelmaps.append(out)
             mappings.append(mapping)
 
             # For contiguous output, each labelmap produces one output channel (the remapped map)
