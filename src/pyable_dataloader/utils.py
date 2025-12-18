@@ -2,27 +2,8 @@ from pyable import imaginable as ima
 import tempfile
 import numpy as np
 
-def update_manifest_with_roivalues(manifest, roivalue):
-    """
-    Update the manifest to include 'roivalues' for each subject based on the provided roivalues_dict.
-    roivalues_dict should be a dictionary mapping subject IDs to lists of ROI values.
-    """
-    updated_manifest = manifest.copy()
-    for k,v in manifest.items():
-        updated_manifest[k]['roivalues'] = roivalue
-    return updated_manifest
 
-def update_manifest_with_labelmapvalues(manifest, labelmapvalues):
-    """
-    Update the manifest to include 'labelmapvalues' for each subject based on the provided labelmapvalues_dict.
-    labelmapvalues_dict should be a dictionary mapping subject IDs to lists of ROI values.
-    """
-    updated_manifest = manifest.copy()
-    for k,v in manifest.items():
-        updated_manifest[k]['labelmapvalues'] = labelmapvalues
-    return updated_manifest
-
-def update_manifest_with_reference(manifest, orientation='LPS', resolution=[2.0, 2.0, 2.0], reference_idx=0, target_size=None):
+def update_manifest_with_reference(manifest, orientation='LPS', resolution=[2.0, 2.0, 2.0], reference_idx=0, target_size=None, target_output_dir=None):
     """
     For each subject in the manifest, create a reference image with the specified orientation and resolution,
     save it to /tmp, and update the 'reference' field in the manifest.
@@ -44,17 +25,17 @@ def update_manifest_with_reference(manifest, orientation='LPS', resolution=[2.0,
             try:
                 ts = [int(x) for x in target_size]
                 # SimpleITK expects size as (X, Y, Z) -> (W, H, D)
-                sitk_size = (ts[2], ts[1], ts[0])
+                sitk_size = ts
             except Exception:
                 raise ValueError("target_size must be an iterable of three ints [D,H,W]")
 
             # Compute center of the source image in physical coordinates
             try:
-                center_phys = np.array(img.getImageCenterCoordinates(), dtype=float)
+                center_phys = np.array(img.getImageCenterCoordinate(), dtype=float)
             except Exception:
                 # fallback: compute from size/spacing
-                s = np.array(img.getImageSize())
-                center_phys = img.getCoordinatesFromIndex((s[0]/2.0, s[1]/2.0, s[2]/2.0))
+                
+                center_phys = img.getImageCenterCoordinate()
 
             # Direction cosines (as 3x3 matrix)
             dir_tuple = img.getImageDirection()
@@ -63,7 +44,7 @@ def update_manifest_with_reference(manifest, orientation='LPS', resolution=[2.0,
             spacing = (float(resolution[0]), float(resolution[1]), float(resolution[2]))
 
             # index center in SITK index order (X,Y,Z) -> use sitk_size
-            idx_center = np.array([(sitk_size[0] - 1) / 2.0, (sitk_size[1] - 1) / 2.0, (sitk_size[2] - 1) / 2.0], dtype=float)
+            idx_center = img.getImageCenterIndex()
             phys_offset = dir_mat.dot(idx_center * np.array(spacing))
             origin = center_phys - phys_offset
 
@@ -88,7 +69,11 @@ def update_manifest_with_reference(manifest, orientation='LPS', resolution=[2.0,
                 print(f"Reference exists for subject {k}: {ref_path} (skipping creation)")
         else:
             # Save reference image to /tmp (no size enforcement)
-            ref_path = os.path.join(tempfile.gettempdir(), f"{k}_reference.nii.gz")
+            
+            if target_output_dir is not None:
+                ref_path = os.path.join(target_output_dir, f"{k}_reference.nii.gz")
+            else:
+                ref_path = os.path.join(tempfile.gettempdir(), f"{k}_reference.nii.gz")
             if not os.path.exists(ref_path):
                 img.writeImageAs(ref_path)
             else:

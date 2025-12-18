@@ -27,9 +27,10 @@ def main():
     manifest = update_manifest_with_reference(
         manifest,
         orientation='LPS',
-        resolution=[2.0, 2.0, 2.0],
+        resolution=[1.0, 1.0, 1.0],
         reference_idx=0,
-        target_size=[64, 64, 80]
+        target_size=[20, 80, 80],
+        target_output_dir='debug_outputs/simple_dataset_test'
     )
 
     # Example: Compose a set of transforms for augmentation
@@ -38,9 +39,9 @@ def main():
         # RandomRotation(rotation_range=[[-10, 10]]*3),
         #RandomFlip(axes=[1]),
         #RandomNoise(std=2),
-        RandomAffine(scale_range=[0.9, 1.1], rotation_range=[[-10, 10]]*3, translation_range=[[-5, 5]]*3),
+        RandomAffine(scale_range=[0.98, 1.02], rotation_range=[[-5, 5]]*3, translation_range=[[-5, 5]]*3),
         IntensityNormalization(method='minmax',clip_percentile=(0, 99.5)),
-        LabelMapOneHot(exclude_background=True, as_images=False, meta_key='labelmap_values',values=[1,2,3,4])
+        LabelMapOneHot(values=[1,2,3,4], meta_key='labelmap_values')
     ])
     # transforms=None  # Disable transforms for testing
     # Create dataset with augmentation and debug saving enabled

@@ -103,20 +103,16 @@ class LabelMapOneHot(MedicalImageTransform):
     detecting unique values from the labelmap.
 
     Args:
-        exclude_background: If True, exclude label value 0 from one-hot channels
-        as_images: If True, append the one-hot channels to `images` (as additional channels).
-                   Default False (returns one-hot masks in `labelmaps`).
         keep_original: If True, keep the original labelmap in the returned `labelmaps` list
                        (original will be the first element).
         meta_key: key to read/store mapping info in `meta` (useful to decode predictions).
-        values: Optional explicit list of label values to use for all labelmaps.
+        values: Explicit list of label values to use for all labelmaps (MANDATORY).
     """
-
-    def __init__(self, exclude_background: bool = True, as_images: bool = False,  meta_key: str = 'labelmap_values', values: Optional[List[int]] = None):
-        self.exclude_background = exclude_background
-        self.as_images = as_images
+    def __init__(self, keep_original: bool = False, meta_key: str = 'labelmap_values', values: Optional[List[int]] = None):
+        if values is None:
+            raise ValueError("LabelMapOneHot requires explicit 'values' argument")
         self.meta_key = meta_key
-        self.values = None if values is None else np.asarray(values)
+        self.values = np.asarray(values)
 
     def __call__(self, images, rois, labelmaps, meta):
         if not labelmaps:
@@ -135,25 +131,8 @@ class LabelMapOneHot(MedicalImageTransform):
                 arr = np.asarray(lm)
                 sitk_img = None
 
-            # Determine label values to encode (explicit -> meta -> image unique)
-            if self.values is not None:
-                vals = _normalize_label_values(self.values)
-            elif meta is not None and isinstance(meta, dict) and self.meta_key in meta:
-                mv = meta.get(self.meta_key)
-                # support meta being list-of-lists or list-of-dicts
-                if isinstance(mv, (list, tuple)) and len(mv) > i:
-                    entry = mv[i]
-                    if isinstance(entry, dict) and 'values' in entry:
-                        vals = _normalize_label_values(entry['values'])
-                    else:
-                        vals = _normalize_label_values(entry)
-                else:
-                    vals = _normalize_label_values(mv)
-            else:
-                vals = _normalize_label_values(np.unique(arr))
-
-            if self.exclude_background:
-                vals = vals[vals != 0]
+            # Determine label values to encode (explicit only - mandatory)
+            vals = _normalize_label_values(self.values)
 
             # Record per-labelmap mapping
             mappings.append({'values': vals.tolist()})
@@ -226,26 +205,9 @@ class LabelMapOneHot(MedicalImageTransform):
                 else:
                     new_labelmaps.append(c)
 
-            # Optionally append channels to images
-            if self.as_images:
-                try:
-                    # If images were Imaginable objects, wrap channel arrays into SITKImaginable
-                    if isinstance(images, list) and images and hasattr(images[0], 'getImageAsNumpy'):
-                        for c in channels:
-                            try:
-                                img_obj = SITKImaginable()
-                                refimg = images[0].getImage()
-                                img_obj.setImageFromNumpy(c, refimage=refimg)
-                                images.append(img_obj)
-                            except Exception:
-                                images.append(c)
-                    else:
-                        if images.ndim == 4:
-                            images = np.concatenate([images, np.stack(channels, axis=0)], axis=0)
-                        elif images.ndim == 3:
-                            images = np.concatenate([np.expand_dims(images, 0), np.stack(channels, axis=0)], axis=0)
-                except Exception:
-                    pass
+            # NOTE: appending one-hot channels directly to `images` was removed.
+            # If callers want channels as image-inputs, they should explicitly
+            # concatenate or wrap labelmap channels upstream of the transform.
 
         # Write mappings into meta for downstream decoding
         if meta is not None:
@@ -263,17 +225,16 @@ class LabelMapContiguous(MedicalImageTransform):
     Prefers explicit `values` passed to the transform or values present in `meta` under `meta_key`.
 
     Args:
-        exclude_background: If True, do not include 0 in remapping (0 stays 0)
         keep_original: If True, keep the original labelmap in the returned list (first element)
         meta_key: key to read/store mapping original->contiguous in `meta` for decoding
-        values: Optional explicit list of label values to use for remapping
+        values: Explicit list of label values to use for remapping (MANDATORY)
     """
-
-    def __init__(self, exclude_background: bool = True, keep_original: bool = False, meta_key: str = 'labelmap_mapping', values: Optional[List[int]] = None):
-        self.exclude_background = exclude_background
+    def __init__(self, keep_original: bool = False, meta_key: str = 'labelmap_mapping', values: Optional[List[int]] = None):
+        if values is None:
+            raise ValueError("LabelMapContiguous requires explicit 'values' argument")
         self.keep_original = keep_original
         self.meta_key = meta_key
-        self.values = None if values is None else np.asarray(values)
+        self.values = np.asarray(values)
 
     def __call__(self, images, rois, labelmaps, meta):
         if not labelmaps:
@@ -291,24 +252,8 @@ class LabelMapContiguous(MedicalImageTransform):
             else:
                 arr = lm if isinstance(lm, np.ndarray) else np.asarray(lm)
 
-            # Determine label values to remap (constructor -> meta -> image unique)
-            if self.values is not None:
-                vals = _normalize_label_values(self.values)
-            elif meta is not None and isinstance(meta, dict) and self.meta_key in meta:
-                mv = meta.get(self.meta_key)
-                if isinstance(mv, (list, tuple)) and len(mv) > i:
-                    entry = mv[i]
-                    if isinstance(entry, dict) and 'values' in entry:
-                        vals = _normalize_label_values(entry['values'])
-                    else:
-                        vals = _normalize_label_values(entry)
-                else:
-                    vals = _normalize_label_values(mv)
-            else:
-                vals = _normalize_label_values(np.unique(arr))
-
-            if self.exclude_background:
-                vals = vals[vals != 0]
+            # Determine label values to remap (explicit only - mandatory)
+            vals = _normalize_label_values(self.values)
 
             # Build contiguous mapping: original value -> new label (1..N), 0 reserved for background
             mapping = {}
