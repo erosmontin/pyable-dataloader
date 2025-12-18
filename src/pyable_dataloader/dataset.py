@@ -61,18 +61,18 @@ class PyableDataset(Dataset):
         images = [SITKImaginable(filename=p) for p in item.get('images', [])]
         labelmaps = [LabelMapable(filename=p) for p in item.get('labelmaps', [])]
         
-        # labelmapsvalue MUST be provided in the manifest. It tells the dataset which
-        # label values to keep/encode for each labelmap. Supported manifest forms:
+        # labelmapsvalue is optional in the manifest. If provided it tells the
+        # dataset which label values to keep/encode for each labelmap. Supported
+        # manifest forms remain:
         # - flat list of ints: [1,2,3] -> apply same values to every labelmap
         # - list-of-lists: [[1,2],[3],[1]] -> per-labelmap value lists
         # - scalar/int: 1 -> treat as single value for each labelmap
         #
-        # This block normalizes the manifest-provided values and applies
-        # `filterValues` to each `LabelMapable` so downstream transforms see
-        # labelmaps that already contain only the requested values.
-        if labelmapsvalue is None:
-            raise ValueError(f"Manifest for subject {subject_id} must include 'labelmap_values' (per-labelmap or flat list)")
-
+        # If `labelmap_values` is provided we will apply `filterValues(lv)` to
+        # each `LabelMapable`. If not provided we will leave the labelmaps as
+        # loaded and auto-detect per-labelmap unique values (these are written
+        # into `meta['labelmap_values']` later so downstream transforms can read
+        # them if needed).
         normalized_labelmap_values = labelmapsvalue
         # If it's a numpy array, convert to python list for introspection
         try:
@@ -83,32 +83,55 @@ class PyableDataset(Dataset):
             pass
 
         new_labelmaps = []
+        detected_labelmap_values = []
         for i, lm in enumerate(labelmaps):
-            # Determine per-labelmap values (list-of-lists or flat list)
-            if isinstance(normalized_labelmap_values, (list, tuple)) and len(normalized_labelmap_values) > 0:
-                first = normalized_labelmap_values[0]
-                if isinstance(first, (list, tuple)) or (hasattr(first, '__iter__') and not isinstance(first, (str, bytes)) and not isinstance(first, int)):
-                    # list-of-lists: take i-th entry if present
-                    if len(normalized_labelmap_values) > i:
-                        lv = normalized_labelmap_values[i]
+            lv = None
+            # Determine per-labelmap values (list-of-lists or flat list) if provided
+            if normalized_labelmap_values is not None:
+                if isinstance(normalized_labelmap_values, (list, tuple)) and len(normalized_labelmap_values) > 0:
+                    first = normalized_labelmap_values[0]
+                    if isinstance(first, (list, tuple)) or (hasattr(first, '__iter__') and not isinstance(first, (str, bytes)) and not isinstance(first, int)):
+                        # list-of-lists: take i-th entry if present
+                        if len(normalized_labelmap_values) > i:
+                            lv = normalized_labelmap_values[i]
+                        else:
+                            raise ValueError(f"Manifest 'labelmap_values' does not contain an entry for labelmap index {i} (subject {subject_id})")
                     else:
-                        raise ValueError(f"Manifest 'labelmap_values' does not contain an entry for labelmap index {i} (subject {subject_id})")
+                        # flat list: apply same values to every labelmap
+                        lv = normalized_labelmap_values
                 else:
-                    # flat list: apply same values to every labelmap
+                    # scalar or other single value
                     lv = normalized_labelmap_values
+
+            # If lv is provided, apply filterValues and fail loudly if it errors
+            if lv is not None:
+                try:
+                    filtered = lm.filterValues(lv)
+                    new_labelmaps.append(filtered)
+                except Exception as e:
+                    raise RuntimeError(f"Failed to apply filterValues for subject {subject_id}, labelmap {i} with values={lv}: {e}")
+                # Record the requested values for meta
+                try:
+                    import numpy as _np
+                    if isinstance(lv, _np.ndarray):
+                        lv_list = lv.tolist()
+                    else:
+                        lv_list = list(lv) if isinstance(lv, (list, tuple)) else [int(lv)]
+                except Exception:
+                    lv_list = lv
+                detected_labelmap_values.append(lv_list)
             else:
-                # scalar or other single value
-                lv = normalized_labelmap_values
-
-            # Enforce that lv is provided (dataset requires it)
-            if lv is None:
-                raise ValueError(f"labelmap_values entry for labelmap {i} (subject {subject_id}) is None")
-
-            # Apply filterValues and fail loudly if it errors (so manifest mistakes are visible)
-            try:
-                new_labelmaps.append(lm.filterValues(lv))
-            except Exception as e:
-                raise RuntimeError(f"Failed to apply filterValues for subject {subject_id}, labelmap {i} with values={lv}: {e}")
+                # No filtering requested; keep original LabelMapable and detect its values
+                new_labelmaps.append(lm)
+                try:
+                    if hasattr(lm, 'getImageAsNumpy'):
+                        arr = lm.getImageAsNumpy()
+                    else:
+                        arr = np.asarray(lm)
+                    vals = np.unique(arr).tolist()
+                except Exception:
+                    vals = []
+                detected_labelmap_values.append(vals)
 
         labelmaps = new_labelmaps
         rois = [Roiable(filename=p, roivalue=roivalue) for p in item.get('rois', [])]
@@ -152,16 +175,16 @@ class PyableDataset(Dataset):
             meta = {'center': cir}
             # Normalize and attach manifest label/roi hints to meta under the
             # canonical keys expected by transforms.
-            if labelmapsvalue is not None:
-                # If user provided a flat list of ints for a single labelmap, wrap
-                # as a list-of-lists so downstream code can index per-labelmap.
-                if isinstance(labelmapsvalue, (list, tuple)) and labelmapsvalue and all(isinstance(x, (int, np.integer)) for x in labelmapsvalue):
-                    meta['labelmap_values'] = [list(labelmapsvalue)
-                                               ]
+            # If manifest provided explicit labelmap values, preserve that
+            # structure in meta; otherwise populate meta using detected values
+            # we computed earlier per-labelmap.
+            if normalized_labelmap_values is not None:
+                if isinstance(normalized_labelmap_values, (list, tuple)) and normalized_labelmap_values and all(isinstance(x, (int, np.integer)) for x in normalized_labelmap_values):
+                    meta['labelmap_values'] = [list(normalized_labelmap_values)]
                 else:
-                    meta['labelmap_values'] = labelmapsvalue
+                    meta['labelmap_values'] = normalized_labelmap_values
             else:
-                meta['labelmap_values'] = None
+                meta['labelmap_values'] = detected_labelmap_values
 
             if roivalue is not None:
                 meta['roi_values'] = roivalue

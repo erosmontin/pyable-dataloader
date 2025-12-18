@@ -84,4 +84,7 @@ def update_manifest_with_reference(manifest, orientation='LPS', resolution=[2.0,
                 else:
                     print(f"Reference exists for subject {k}: {ref_path} (skipping write)")
             updated_manifest[k]['reference'] = ref_path
+        else:
+            
+            updated_manifest[k]['reference'] = ref_path
     return updated_manifest
