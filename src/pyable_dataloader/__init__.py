@@ -12,6 +12,7 @@ from .transforms import (
     LabelMapToRoi,
     TRANSFORM_AFTER_RESAMPLING,
     Compose,
+    FlipDimensions,
 )
 
 __version__ = "3.1.0"
@@ -26,4 +27,5 @@ __all__ = [
     "LabelMapToRoi",
     "TRANSFORM_AFTER_RESAMPLING",
     "Compose",
+    "FlipDimensions",
 ]

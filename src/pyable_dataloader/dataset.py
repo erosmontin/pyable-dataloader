@@ -27,6 +27,7 @@ class PyableDataset(Dataset):
         transforms=None,
         normalizations=None,
         debug_save_dir=None,
+        dtype=None,
     ):
         if isinstance(manifest, str):
             if manifest.endswith('.json'):
@@ -44,7 +45,7 @@ class PyableDataset(Dataset):
         self.transforms = transforms
         self.normalizations = normalizations
         self.debug_save_dir = debug_save_dir
-    
+        self.dtype = dtype
     def __len__(self):
         return len(self.ids)
 
@@ -116,8 +117,9 @@ class PyableDataset(Dataset):
         rois_tensor = _to_tensor_list(rois)
 
         # Debug save images, labelmaps, rois if debug_save_dir is set
+        subject_uuid = str(uuid.uuid4())
+
         if self.debug_save_dir is not None:
-            subject_uuid = str(uuid.uuid4())
             # Save images
             for idx, a in enumerate(images):
                 fn = f"{self.debug_save_dir}/{subject_uuid}_image_{idx}.nii.gz"

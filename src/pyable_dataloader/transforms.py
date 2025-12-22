@@ -1,7 +1,7 @@
 import random
 
 
-
+from pyable.imaginable import create_affine_matrix
     
 class Compose:
     """
@@ -31,6 +31,19 @@ class RandomRototranslation:
         self.translation_range = translation_range
 
     def __call__(self, ables, meta=None):
+        
+        if isinstance(self.angle_range[0], (tuple, list)):
+            angles = [random.uniform(r[0], r[1]) for r in self.angle_range]
+        else:
+            angles = [random.uniform(self.angle_range[0], self.angle_range[1]) for _ in range(a.getImageDimension())]
+        # Support per-axis or single range for translation
+        translation = None
+        if self.translation_range is not None:
+            if isinstance(self.translation_range[0], (tuple, list)):
+                translation = [random.uniform(r[0], r[1]) for r in self.translation_range]
+            else:
+                translation = [random.uniform(self.translation_range[0], self.translation_range[1]) for _ in range(a.getImageDimension())]
+                
         for i, a in enumerate(ables):
             # Determine center: from meta if available, else from image
             center = None
@@ -39,17 +52,7 @@ class RandomRototranslation:
             else:
                 center = a.getImageCenterCoordinate()
             # Support per-axis or single range for rotation
-            if isinstance(self.angle_range[0], (tuple, list)):
-                angles = [random.uniform(r[0], r[1]) for r in self.angle_range]
-            else:
-                angles = [random.uniform(self.angle_range[0], self.angle_range[1]) for _ in range(a.getImageDimension())]
-            # Support per-axis or single range for translation
-            translation = None
-            if self.translation_range is not None:
-                if isinstance(self.translation_range[0], (tuple, list)):
-                    translation = [random.uniform(r[0], r[1]) for r in self.translation_range]
-                else:
-                    translation = [random.uniform(self.translation_range[0], self.translation_range[1]) for _ in range(a.getImageDimension())]
+        
             # Pad image so all corners remain after transform
             safe_a = SafeImaginable(image=a.getImage())
             safe_a.safepaddingfortransform(angles, center=center, translation=translation)
@@ -61,6 +64,34 @@ class RandomRototranslation:
 # =============================
 # RandomAffineTransform
 # =============================
+def xyz_to_numpy_axis(axis):
+    # axis: 0 (x), 1 (y), 2 (z)
+    # returns: numpy axis for (z, y, x) ordering
+    mapping = {0: 2, 1: 1, 2: 0}
+    return mapping[axis]
+
+# Example: flip along x in xyz
+class FlipDimensions:
+    """
+    Randomly flip images (not labelmaps or rois) along specified dimensions with given probability.
+    Args:
+        axis (list): List of axis indices to consider for flipping (e.g., [0, 1, 2] for 3D).
+        p (float): Probability of flipping along each axis.
+    """
+    def __init__(self, axis=[0, 1, 2]):
+        self.axis = axis
+    
+    def __call__(self, ables, meta=None):
+        # Support both numpy arrays and pyable Imaginable objects
+        for axis in self.axis:
+            # Imaginable list path
+            for ab in ables:
+                arr = ab.getImageAsNumpy()                
+                flipped = np.flip(arr, axis=xyz_to_numpy_axis(axis)) # for numpy zyx ordering
+                # write back preserving spatial metadata
+                ab.setImageFromNumpy(flipped)
+        return ables
+    
 class RandomAffineTransform:
     """
     Apply a random affine transformation (scale, rotation, translation) to images (not labelmaps or rois).
@@ -75,29 +106,30 @@ class RandomAffineTransform:
         self.translation_range = translation_range
 
     def __call__(self, ables, meta=None):
-        from pyable.imaginable import create_affine_matrix
+
+        center = None
+        if meta and 'center' in meta:
+            center = meta['center']
+        else:
+            center = a.getImageCenterCoordinate()
+        # Support per-axis or single range for rotation
+        if isinstance(self.angle_range[0], (tuple, list)):
+            angles = [random.uniform(r[0], r[1]) for r in self.angle_range]
+        else:
+            angles = [random.uniform(self.angle_range[0], self.angle_range[1]) for _ in range(a.getImageDimension())]
+        # Support per-axis or single range for scale
+        if isinstance(self.scale_range[0], (tuple, list)):
+            scales = [random.uniform(r[0], r[1]) for r in self.scale_range]
+        else:
+            scales = [random.uniform(self.scale_range[0], self.scale_range[1]) for _ in range(a.getImageDimension())]
+        # Support per-axis or single range for translation
+        if isinstance(self.translation_range[0], (tuple, list)):
+            translation = [random.uniform(r[0], r[1]) for r in self.translation_range]
+        else:
+                translation = [random.uniform(self.translation_range[0], self.translation_range[1]) for _ in range(a.getImageDimension())]
         for i, a in enumerate(ables):
             # Determine center: from meta if available, else from image
-            center = None
-            if meta and 'center' in meta:
-                center = meta['center']
-            else:
-                center = a.getImageCenterCoordinate()
-            # Support per-axis or single range for rotation
-            if isinstance(self.angle_range[0], (tuple, list)):
-                angles = [random.uniform(r[0], r[1]) for r in self.angle_range]
-            else:
-                angles = [random.uniform(self.angle_range[0], self.angle_range[1]) for _ in range(a.getImageDimension())]
-            # Support per-axis or single range for scale
-            if isinstance(self.scale_range[0], (tuple, list)):
-                scales = [random.uniform(r[0], r[1]) for r in self.scale_range]
-            else:
-                scales = [random.uniform(self.scale_range[0], self.scale_range[1]) for _ in range(a.getImageDimension())]
-            # Support per-axis or single range for translation
-            if isinstance(self.translation_range[0], (tuple, list)):
-                translation = [random.uniform(r[0], r[1]) for r in self.translation_range]
-            else:
-                translation = [random.uniform(self.translation_range[0], self.translation_range[1]) for _ in range(a.getImageDimension())]
+
             # Pad image so all corners remain after transform
             safe_a = SafeImaginable(image=a.getImage())
             safe_a.safepaddingfortransform(angles, center=center, translation=translation)
@@ -189,6 +221,7 @@ class SafeImaginable(ima.SITKImaginable):
         import numpy as np
         import SimpleITK as sitk
         from pyable.imaginable import create_affine_matrix
+
         # Get original corners in physical space
         corners = self.getCornersCoordinates()
         dim = self.getImageDimension()
@@ -196,6 +229,7 @@ class SafeImaginable(ima.SITKImaginable):
             center = self.getImageCenterCoordinate()
         if scaling is None:
             scaling = [1.0] * dim
+
         # Build affine transform
         affine_matrix = create_affine_matrix(rotation=angles, scaling=scaling)
         if dim == 3:
@@ -205,34 +239,41 @@ class SafeImaginable(ima.SITKImaginable):
             if translation is not None:
                 transform.SetTranslation(translation)
         elif dim == 2:
-            # For 2D, use upper-left 2x2 of affine_matrix
             transform = sitk.AffineTransform(2)
-            matrix_2d = affine_matrix[:2,:2].flatten()
+            matrix_2d = affine_matrix[:2, :2].flatten()
             transform.SetMatrix(matrix_2d)
             transform.SetCenter(center)
             if translation is not None:
                 transform.SetTranslation(translation[:2])
         else:
             raise ValueError("Only 2D/3D supported")
+
         # Transform all corners
         transformed_corners = [transform.TransformPoint(c) for c in corners]
-        # Find min/max in each dimension
+        all_points = np.array(transformed_corners)
+
+        # Find min/max in each dimension for transformed corners
+        min_coords = all_points.min(axis=0)
+        max_coords = all_points.max(axis=0)
+
+        # Get current image bounds in physical space
         orig_spacing = np.array(self.getImageSpacing())
         orig_origin = np.array(self.getImageOrigin())
         orig_size = np.array(self.getImageSize())
-        all_points = np.array(transformed_corners)
-        min_coords = all_points.min(axis=0)
-        max_coords = all_points.max(axis=0)
-        # Compute required padding in physical space
         img_min = orig_origin
         img_max = orig_origin + orig_spacing * (orig_size - 1)
-        pad_lower_phys = img_min - min_coords
+
+        # Compute required padding in physical space
+        pad_lower_phys = min_coords - img_min
         pad_upper_phys = max_coords - img_max
+
         # Convert to voxels (round up)
         pad_lower = np.maximum(np.floor(pad_lower_phys / orig_spacing), 0).astype(int)
         pad_upper = np.maximum(np.ceil(pad_upper_phys / orig_spacing), 0).astype(int)
-        # Pad the image
-        self.padImage(pad_lower.tolist(), pad_upper.tolist())
+
+        # Only pad if needed
+        if np.any(pad_lower > 0) or np.any(pad_upper > 0):
+            self.padImage(pad_lower.tolist(), pad_upper.tolist())
         return self
     
 
