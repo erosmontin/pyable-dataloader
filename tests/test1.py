@@ -2,7 +2,7 @@ import os
 import torch
 from pyable_dataloader.dataset import PyableDataset
 from pyable_dataloader.utils import update_manifest_with_reference
-from pyable_dataloader.transforms import IntensityPercentile, Compose,RandomRototranslation,LabelMapToRoi,FlipDimensions
+from pyable_dataloader.transforms import IntensityPercentile, Compose,RandomRototranslation,LabelMapToRoi,FlipDimensions, IntensityMinMax
 import pyable.imaginable as ima
 
 def test_intensity_percentile_transform_on_realdata():
@@ -36,7 +36,7 @@ def test_intensity_percentile_transform_on_realdata():
 	])
     
     normalizations = Compose([
-        IntensityPercentile(low=0, high=100)
+        IntensityMinMax(),
     ])
     dataset = PyableDataset(
         manifest=manifest,
