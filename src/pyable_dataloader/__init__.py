@@ -7,15 +7,23 @@ from .transforms import (
     IntensityPercentile,
     IntensityZScore,
     RandomRototranslation,
+    RandomAffineTransform,
+    IntensityMinMax,
+    LabelMapToRoi,
+    TRANSFORM_AFTER_RESAMPLING,
     Compose,
 )
 
-__version__ = "3.5.0"
+__version__ = "3.1.0"
 
 __all__ = [
     "PyableDataset",
     "IntensityPercentile",
     "IntensityZScore",
     "RandomRototranslation",
+    "RandomAffineTransform",
+    "IntensityMinMax",
+    "LabelMapToRoi",
+    "TRANSFORM_AFTER_RESAMPLING",
     "Compose",
 ]
