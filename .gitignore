@@ -11,3 +11,5 @@ testenv/
 dist/
 *.pth
 debug_outputs/
+debug/
+

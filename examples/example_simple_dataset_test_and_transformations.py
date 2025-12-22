@@ -34,7 +34,7 @@ def main():
     )
 
     # Example: Compose a set of transforms for augmentation
-    from pyable_dataloader.transforms import Compose, RandomFlip, IntensityNormalization, RandomRotation,RandomAffine,RandomNoise,LabelMapOneHot
+    from pyable_dataloader._transforms import Compose, RandomFlip, IntensityNormalization, RandomRotation,RandomAffine,RandomNoise,LabelMapOneHot
     transforms = Compose([
         # RandomRotation(rotation_range=[[-10, 10]]*3),
         #RandomFlip(axes=[1]),
