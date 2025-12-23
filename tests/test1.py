@@ -2,7 +2,7 @@ import os
 import torch
 from pyable_dataloader.dataset import PyableDataset
 from pyable_dataloader.utils import update_manifest_with_reference
-from pyable_dataloader.transforms import IntensityPercentile, Compose,RandomRototranslation,LabelMapToRoi,FlipDimensions, IntensityMinMax
+from pyable_dataloader.transforms import IntensityPercentile, Compose,RandomRototranslationTransform,LabelMapToRoi,FlipDimensions, IntensityMinMax
 import pyable.imaginable as ima
 
 def test_intensity_percentile_transform_on_realdata():
@@ -31,7 +31,7 @@ def test_intensity_percentile_transform_on_realdata():
     # Use ToTorch as the only transform
     transforms = Compose([
 		LabelMapToRoi(labelmapvalues=[1, 2, 3]),
-		RandomRototranslation(angle_range=((-10, 10), (-10, 10), (-10, 10)), translation_range=[(-5, 5), (-5, 5), (-5, 5)]),
+		RandomRototranslationTransform(angle_range=((-10, 10), (-10, 10), (-10, 10)), translation_range=[(-5, 5), (-5, 5), (-5, 5)]),
 		FlipDimensions(axis=[0])
 	])
     

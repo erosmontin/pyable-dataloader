@@ -85,7 +85,7 @@ class PyableDataset(Dataset):
                 if hasattr(a, 'resampleOnTargetImage'):
                     a = a.resampleOnTargetImage(reference)
         if self.normalizations is not None:
-            self.normalizations(ables,meta)
+            ables = self.normalizations(ables,meta)
         # Separate ables by type for output
         images = [a for a in ables if isinstance(a, SITKImaginable)]
         labelmaps = [a for a in ables if isinstance(a, LabelMapable)]
