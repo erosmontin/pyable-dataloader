@@ -17,7 +17,7 @@ class Compose:
             ables = t(ables, meta)
         return ables
 
-class RandomRototranslation:
+class RandomRototranslationTransform:
     """
     Apply a random rotation and optional translation to images (not labelmaps or rois).
     Rotates by a random angle (in degrees) within the given range for each axis.

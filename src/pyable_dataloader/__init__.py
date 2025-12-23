@@ -6,7 +6,7 @@ from .dataset import PyableDataset
 from .transforms import (
     IntensityPercentile,
     IntensityZScore,
-    RandomRototranslation,
+    RandomRototranslationTransform,
     RandomAffineTransform,
     IntensityMinMax,
     LabelMapToRoi,
@@ -21,7 +21,7 @@ __all__ = [
     "PyableDataset",
     "IntensityPercentile",
     "IntensityZScore",
-    "RandomRototranslation",
+    "RandomRototranslationTransform",
     "RandomAffineTransform",
     "IntensityMinMax",
     "LabelMapToRoi",
